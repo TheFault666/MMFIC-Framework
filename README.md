@@ -1,6 +1,8 @@
 <p align="center">
   <img src="/static/logo.png" alt="MMFIC Logo" width="100"/>
 </p>
+
+
 # MMFIC: Multi-Modal Forum Identity Correlation Framework 
 
 *Currently in Public Beta. See the Wiki for known issues and contribution guidelines.*
