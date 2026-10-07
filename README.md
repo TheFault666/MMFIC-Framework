@@ -8,8 +8,6 @@ The framework is divided into two primary subsystems:
 1. **Trowler (Data Acquisition Engine):** A LLM-powered headless crawler built to bypass EndGame, DDoS-Guard, and strict login walls.
 2. **The Similarity Engine:** A Machine Learning pipeline that extracts stylistic, linguistic, and behavioral metadata from crawled posts to correlate user pseudonyms across different platforms.
 
-This tool is being published alongside academic research. If you use it in your research, please see the **Citation** section below.
-
 ## Key Features
 
 ### Trowler (Crawling Subsystem)
