@@ -2,7 +2,7 @@
 
 *Currently in Public Beta. See the Wiki for known issues and contribution guidelines.*
 
-**MMFIC** (Multi-Modal Forum Identity Correlation) is a state-of-the-art Open Source Intelligence (OSINT) framework designed to track, correlate, and unmask anonymous threat actors across heavily fortified Darkweb forums (.onion) and Clearnet platforms (like X/Twitter). 
+**MMFIC** (Multi-Modal Forum Identity Correlation) is a Open Source Intelligence (OSINT) framework designed to track, correlate, and unmask anonymous threat actors across heavily fortified Darkweb forums (.onion) and Clearnet platforms (like X/Twitter). 
 
 The framework is divided into two primary subsystems:
 1. **Trowler (Data Acquisition Engine):** A highly advanced, LLM-powered headless crawler built to bypass EndGame, DDoS-Guard, and strict login walls.
@@ -64,17 +64,6 @@ python main.py
 python dashboard.py
 ```
 *Access the web UI at `http://127.0.0.1:5000` to manage Trowler crawls, view logs, and handle CAPTCHAs interactively.*
-
-## 📚 Academic Citation
-If you utilize this framework in your academic research, please cite our upcoming paper:
-```bibtex
-@article{MMFIC2026,
-  title={Multi-Modal Forum Identity Correlation: Advanced OSINT Data Acquisition and Linguistic Fingerprinting on the Darkweb},
-  author={Your Name / Academic Institution},
-  year={2026},
-  journal={Pending Publication}
-}
-```
 
 ## ⚖️ License
 This project is licensed under the **GNU Affero General Public License v3.0 (AGPLv3)**. 
