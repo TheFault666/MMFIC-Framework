@@ -1,0 +1,22 @@
+{
+  "www.reddit.com": {
+    "container_selector": "div[data-testid='comment']",
+    "username_selector": "a[data-testid='comment_author_link']",
+    "post_selector": "div[data-testid='comment'] p",
+    "timestamp_selector": "a time"
+  },
+
+  "tenebrispoyfrcup4k24lciwrh4gc5735hmld4dweq7his7zh423opqd.onion": {
+    "container_selector": "div.message-container.standard",
+    "username_selector": "a.hover-card-link, span.name, a.name",
+    "post_selector": "div.title a, div.content",
+    "timestamp_selector": "div.date, time, span.date, .timestamp"
+  },
+  
+  "dreadytofatroptsdj6io7l3xptbet6onoyno2yv7jicoxknyazubrad.onion": {
+    "container_selector": "div.postTop",
+    "username_selector": "a.author_link",
+    "post_selector": "div.title a, div.postTop + * a.title",
+    "timestamp_selector": "div.postTop span[title]"
+  }
+}

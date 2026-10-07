@@ -1,0 +1,16 @@
+requests
+numpy
+beautifulsoup4
+scikit-learn==1.8.0
+urllib3
+flask
+stem
+pysocks
+google-genai
+python-dotenv
+playwright
+playwright-stealth==1.0.6
+dateparser
+lightgbm
+setuptools<70.0.0
+litellm

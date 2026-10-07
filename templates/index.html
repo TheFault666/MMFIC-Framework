@@ -1,0 +1,1460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TROWLER // MMFIC</title>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --neon-cyan: #38bdf8; /* Soft blue */
+            --neon-magenta: #818cf8; /* Soft indigo */
+            --neon-purple: #6366f1;
+            --bg-dark: #0f172a; /* Slate 900 */
+            --bg-panel: #1e293b; /* Slate 800 */
+            --bg-card: #1e293b;
+            --glass-border: #334155; /* Slate 700 */
+            --text-primary: #f8fafc; /* Slate 50 */
+            --text-muted: #94a3b8; /* Slate 400 */
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Rajdhani', sans-serif;
+            background-color: var(--bg-dark);
+            color: var(--text-primary);
+            overflow-x: hidden;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        h1, h2, h3, h4, .brand-text {
+            font-family: 'Orbitron', sans-serif;
+            text-transform: uppercase;
+        }
+
+        /* Animations */
+        @keyframes pulse {
+            0%, 100% { opacity: 1; box-shadow: 0 0 10px var(--neon-cyan); }
+            50% { opacity: 0.6; box-shadow: 0 0 20px var(--neon-cyan); }
+        }
+
+        @keyframes shimmer {
+            0% { background-position: 200% 0; }
+            100% { background-position: -200% 0; }
+        }
+
+        @keyframes spin {
+            100% { transform: rotate(360deg); }
+        }
+
+        /* Header */
+        header {
+            padding: 20px;
+            text-align: center;
+            background: linear-gradient(180deg, rgba(10,10,18,1) 0%, rgba(10,10,18,0) 100%);
+            position: relative;
+            z-index: 100;
+        }
+
+        .header-title {
+            font-size: 2.5rem;
+            font-weight: 900;
+            letter-spacing: 4px;
+            color: #fff;
+            text-shadow: 0 0 10px var(--neon-cyan);
+            margin-bottom: 5px;
+        }
+
+        .header-title .separator {
+            color: var(--neon-magenta);
+            text-shadow: 0 0 10px var(--neon-magenta);
+        }
+
+        .header-subtitle {
+            font-size: 1.1rem;
+            color: var(--text-muted);
+            letter-spacing: 2px;
+        }
+
+        .header-line {
+            height: 2px;
+            width: 100%;
+            max-width: 600px;
+            margin: 15px auto 0;
+            background: var(--neon-cyan);
+            animation: pulse 2s infinite;
+        }
+
+        /* Banner */
+        .banner {
+            background: rgba(255, 170, 0, 0.1);
+            border: 1px solid var(--warning);
+            color: var(--warning);
+            padding: 12px 20px;
+            text-align: center;
+            font-weight: 600;
+            margin: 10px 20px;
+            border-radius: 4px;
+            box-shadow: 0 0 10px rgba(255, 170, 0, 0.2);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-wrap: wrap;
+            gap: 15px;
+            z-index: 90;
+        }
+
+        .banner.hidden {
+            display: none;
+        }
+
+        .banner button {
+            background: transparent;
+            border: 1px solid var(--warning);
+            color: var(--warning);
+            padding: 5px 15px;
+            font-family: 'Rajdhani', sans-serif;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .banner button:hover {
+            background: var(--warning);
+            color: #000;
+        }
+
+        .banner .manual-cmd {
+            font-family: monospace;
+            background: rgba(0,0,0,0.5);
+            padding: 4px 8px;
+            border-radius: 3px;
+            font-size: 0.9em;
+        }
+
+        /* Main Container */
+        main {
+            flex: 1;
+            padding: 20px;
+            position: relative;
+            max-width: 1400px;
+            margin: 0 auto;
+            width: 100%;
+        }
+
+        /* Views */
+        .view {
+            display: none;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            contain: content;
+        }
+
+        .view.active {
+            display: block;
+            opacity: 1;
+            animation: fadeIn 0.3s ease forwards;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* UI Elements */
+        .glass-panel {
+            background: var(--bg-panel);
+            border: 1px solid var(--glass-border);
+            border-radius: 8px;
+            padding: 25px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+        }
+
+        .cyber-card {
+            background: var(--bg-card);
+            border: 1px solid var(--glass-border);
+            border-radius: 6px;
+            padding: 30px 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+            will-change: transform;
+            position: relative;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 200px;
+        }
+
+        .cyber-card::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 2px;
+            background: var(--neon-cyan);
+            transform: scaleX(0);
+            transition: transform 0.3s ease;
+            transform-origin: left;
+        }
+
+        .cyber-card:hover {
+            transform: scale(1.02);
+            border-color: var(--neon-cyan);
+            box-shadow: 0 0 25px rgba(0, 240, 255, 0.2);
+        }
+
+        .cyber-card:hover::before {
+            transform: scaleX(1);
+        }
+
+        .cyber-card .icon {
+            font-size: 3rem;
+            margin-bottom: 15px;
+            color: var(--neon-cyan);
+            
+        }
+
+        .cyber-card h3 {
+            font-size: 1.4rem;
+            margin-bottom: 10px;
+            color: #fff;
+        }
+
+        .cyber-card p {
+            color: var(--text-muted);
+            font-size: 1.1rem;
+        }
+
+        /* Grid Layouts */
+        .grid-3 {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 25px;
+        }
+
+        .grid-2 {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 25px;
+        }
+
+        @media (max-width: 900px) {
+            .grid-3 { grid-template-columns: repeat(2, 1fr); }
+        }
+        @media (max-width: 600px) {
+            .grid-3, .grid-2 { grid-template-columns: 1fr; }
+        }
+
+        /* Forms and Inputs */
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: var(--neon-cyan);
+            font-family: 'Orbitron', sans-serif;
+            font-size: 0.9rem;
+            letter-spacing: 1px;
+        }
+
+        input[type="text"], input[type="number"], select {
+            width: 100%;
+            background: rgba(10, 10, 20, 0.8);
+            border: 1px solid var(--text-muted);
+            color: #fff;
+            padding: 12px 15px;
+            font-family: 'Rajdhani', sans-serif;
+            font-size: 1.1rem;
+            border-radius: 4px;
+            transition: all 0.3s ease;
+            outline: none;
+        }
+
+        input:focus, select:focus {
+            border-color: var(--neon-cyan);
+            box-shadow: 0 0 10px rgba(0, 240, 255, 0.2);
+        }
+
+        /* Buttons */
+        .btn {
+            display: inline-block;
+            padding: 12px 25px;
+            font-family: 'Orbitron', sans-serif;
+            font-size: 1rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+            letter-spacing: 1px;
+        }
+
+        .btn-primary {
+            background: var(--neon-purple);
+            color: #000;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+        }
+        .btn-primary:hover {
+            box-shadow: 0 4px 6px rgba(0,0,0,0.4);
+            transform: translateY(-2px);
+        }
+
+        .btn-magenta {
+            background: linear-gradient(45deg, #cc00cc, var(--neon-magenta));
+            color: #000;
+            box-shadow: 0 0 15px rgba(255, 0, 255, 0.4);
+        }
+        .btn-magenta:hover {
+            box-shadow: 0 0 25px rgba(255, 0, 255, 0.7);
+            transform: translateY(-2px);
+        }
+
+        .btn-danger {
+            background: transparent;
+            border: 1px solid var(--danger);
+            color: var(--danger);
+        }
+        .btn-danger:hover {
+            background: rgba(255, 51, 102, 0.1);
+            box-shadow: 0 0 15px rgba(255, 51, 102, 0.3);
+        }
+
+        .btn-muted {
+            background: transparent;
+            border: 1px solid var(--text-muted);
+            color: var(--text-muted);
+        }
+        .btn-muted:hover {
+            background: rgba(122, 122, 154, 0.1);
+            color: #fff;
+            border-color: #fff;
+        }
+
+        .btn-row {
+            display: flex;
+            gap: 15px;
+            margin-top: 25px;
+        }
+
+        .btn-back {
+            background: transparent;
+            border: none;
+            color: var(--neon-cyan);
+            font-family: 'Orbitron', sans-serif;
+            font-size: 1rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 20px;
+            transition: text-shadow 0.2s ease;
+        }
+        .btn-back:hover {
+            text-shadow: 0 0 10px var(--neon-cyan);
+        }
+
+        /* Progress Section */
+        .progress-section {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid rgba(255,255,255,0.1);
+            display: none;
+        }
+
+        .progress-bar-container {
+            width: 100%;
+            height: 8px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-bottom: 15px;
+        }
+
+        .progress-bar-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, var(--neon-cyan), var(--neon-magenta), var(--neon-cyan));
+            background-size: 200% 100%;
+            animation: shimmer 2s linear infinite;
+            transition: width 0.3s ease;
+        }
+
+        .stats-panel {
+            display: flex;
+            justify-content: space-between;
+            font-size: 1.1rem;
+            color: var(--text-primary);
+        }
+        
+        .stats-panel div span {
+            color: var(--neon-cyan);
+            font-weight: bold;
+        }
+
+        /* Training Modal */
+        .modal-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 1000;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+        .modal-overlay.active {
+            display: flex;
+            opacity: 1;
+        }
+
+        .modal-content {
+            background: var(--bg-panel);
+            border: 1px solid var(--neon-magenta);
+            box-shadow: 0 0 30px rgba(255, 0, 255, 0.2);
+            border-radius: 8px;
+            padding: 30px;
+            max-width: 500px;
+            width: 100%;
+            position: relative;
+        }
+
+        .modal-header {
+            font-family: 'Orbitron', sans-serif;
+            color: var(--neon-magenta);
+            font-size: 1.4rem;
+            margin-bottom: 20px;
+            text-align: center;
+            border-bottom: 1px solid rgba(255,0,255,0.3);
+            padding-bottom: 15px;
+        }
+
+        .modal-body p {
+            margin-bottom: 10px;
+            font-size: 1.1rem;
+        }
+        .modal-body span.val {
+            color: var(--neon-cyan);
+            font-weight: bold;
+        }
+
+        /* Identity Graph */
+        #network-container {
+            width: 100%;
+            height: 600px;
+            background: rgba(0,0,0,0.5);
+            border: 1px solid var(--glass-border);
+            border-radius: 4px;
+            margin-top: 20px;
+        }
+        
+        /* Loading Spinner */
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid rgba(0, 240, 255, 0.1);
+            border-top-color: var(--neon-cyan);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+            display: none;
+        }
+
+        /* Stats Bar */
+        .global-stats {
+            text-align: center;
+            margin-top: 40px;
+            color: var(--text-muted);
+            font-family: 'Orbitron', sans-serif;
+            letter-spacing: 2px;
+        }
+        .global-stats span {
+            color: var(--neon-cyan);
+        }
+
+        /* Browse Users */
+        .platform-card {
+            background: rgba(20,20,40,0.8);
+            border: 1px solid var(--glass-border);
+            border-radius: 6px;
+            margin-bottom: 15px;
+            overflow: hidden;
+        }
+        .platform-header {
+            padding: 15px 20px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-family: 'Orbitron', sans-serif;
+            background: rgba(0, 240, 255, 0.05);
+            transition: background 0.2s ease;
+        }
+        .platform-header:hover {
+            background: rgba(0, 240, 255, 0.1);
+        }
+        .platform-body {
+            display: none;
+            padding: 20px;
+            background: rgba(0,0,0,0.3);
+        }
+        .platform-body.active {
+            display: block;
+        }
+        .user-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 15px;
+        }
+        .user-tag {
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(0, 240, 255, 0.2);
+            padding: 10px;
+            border-radius: 4px;
+            text-align: center;
+        }
+        .user-tag .u-name { font-weight: bold; color: #fff; margin-bottom: 5px; }
+        .user-tag .u-posts { font-size: 0.9em; color: var(--text-muted); }
+
+        /* Gauge Area */
+        .compare-result-area {
+            margin-top: 40px;
+            text-align: center;
+            display: none;
+            padding: 30px;
+            background: rgba(0,0,0,0.4);
+            border-radius: 8px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .verdict-badge {
+            display: inline-block;
+            padding: 8px 20px;
+            border-radius: 20px;
+            font-family: 'Orbitron', sans-serif;
+            font-weight: bold;
+            font-size: 1.2rem;
+            margin: 20px 0;
+        }
+        .verdict-same { background: rgba(0, 255, 136, 0.2); color: var(--success); border: 1px solid var(--success); }
+        .verdict-unc { background: rgba(255, 170, 0, 0.2); color: var(--warning); border: 1px solid var(--warning); }
+        .verdict-diff { background: rgba(255, 51, 102, 0.2); color: var(--danger); border: 1px solid var(--danger); }
+        
+        svg text { font-family: 'Orbitron', sans-serif; }
+        .gauge-score { font-size: 24px; font-weight: bold; fill: #fff; }
+        .gauge-label { font-size: 10px; fill: var(--text-muted); letter-spacing: 2px; }
+
+    </style>
+</head>
+<body>
+
+    <header style="display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 20px 0;">
+        <img src="/static/logo.png" alt="MMFIC Logo" style="height: 80px; margin-bottom: 15px; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3));">
+        <div class="header-title" style="text-shadow: none; font-size: 2rem;">TROWLER <span class="separator" style="color: var(--neon-cyan); text-shadow: none;">//</span> MMFIC</div>
+        <div class="header-subtitle">Multi-Modal Forum Identity Correlation</div>
+        <div class="header-line" style="animation: none; background: var(--glass-border);"></div>
+    </header>
+
+    <div id="stale-banner" class="banner hidden">
+        ⚠ Model not trained on latest data. Identity comparison results may vary.
+        <button onclick="startManualTraining()">TRAIN NOW</button>
+        <button onclick="dismissBanner()">DISMISS</button>
+        <span class="manual-cmd">Manual: python -m Model.train --data crawl_data.json</span>
+    </div>
+
+    <main>
+        <!-- ==========================================
+             VIEW: WELCOME
+             ========================================== -->
+        <section id="view-welcome" class="view active">
+            <div class="grid-3" style="margin-top: 40px;">
+                <div class="cyber-card" onclick="showView('view-general-crawl')">
+                    <div class="icon">&#127760;</div>
+                    <h3>General Crawl</h3>
+                    <p>Scrape all threads from a forum index</p>
+                </div>
+                
+                <div class="cyber-card" onclick="showView('view-user-crawl')">
+                    <div class="icon">&#128390;</div>
+                    <h3>User Crawl</h3>
+                    <p>Collect all posts by a specific alias</p>
+                </div>
+                
+                <div class="cyber-card" onclick="showView('view-identity-hub')">
+                    <div class="icon">&#128269;</div>
+                    <h3>Identity Engine</h3>
+                    <p>Resolve cross-platform pseudonyms</p>
+                </div>
+            </div>
+            
+            <div class="global-stats" id="global-stats">
+                <span id="stat-platforms">0</span> PLATFORMS &nbsp;|&nbsp; 
+                <span id="stat-profiles">0</span> PROFILES &nbsp;|&nbsp; 
+                <span id="stat-posts">0</span> POSTS
+            </div>
+        </section>
+
+        <!-- ==========================================
+             VIEW: GENERAL CRAWL
+             ========================================== -->
+        <section id="view-general-crawl" class="view">
+            <button class="btn-back" onclick="showView('view-welcome')">&#9664; BACK TO MENU</button>
+            <div class="glass-panel" style="max-width: 800px; margin: 0 auto;">
+                <h2 style="margin-bottom: 25px; color: var(--neon-cyan);">GENERAL FORUM CRAWL</h2>
+                
+                <div class="form-group">
+                    <label>Starting Forum URL</label>
+                    <input type="text" id="gen-url" placeholder="https://forum.example.onion">
+                </div>
+                
+                <div class="grid-2">
+                    <div class="form-group">
+                        <label>Max Index Pages</label>
+                        <input type="number" id="gen-pages" value="5">
+                    </div>
+                    <div class="form-group">
+                        <label>Max Threads per Page</label>
+                        <input type="number" id="gen-threads" value="10">
+                    </div>
+                </div>
+                
+                <div class="btn-row">
+                    <button class="btn btn-primary" id="btn-gen-start" onclick="startGeneralCrawl()">START CRAWL</button>
+                    <button class="btn btn-danger" id="btn-gen-stop" onclick="stopCrawl()" disabled>STOP</button>
+                    <button class="btn btn-muted" onclick="resetForm('gen')">RESET</button>
+                </div>
+                
+                <div class="progress-section" id="gen-progress-area">
+                    <div class="progress-bar-container">
+                        <div class="progress-bar-fill" id="gen-progress-bar"></div>
+                    </div>
+                                        <div class="stats-panel">
+                        <div>Status: <span id="gen-status-text">Initializing...</span></div>
+                        <div>Posts Found: <span id="gen-posts-count">0</span></div>
+                    </div>
+                    <div id="gen-log-container" style="margin-top: 15px; background: rgba(0,0,0,0.2); border: 1px solid var(--glass-border); border-radius: 4px; padding: 10px; height: 120px; overflow-y: auto; font-size: 0.9rem; font-family: 'Rajdhani', sans-serif; display: flex; flex-direction: column; gap: 4px;">
+                        <div style="color: var(--text-muted); font-style: italic;">Awaiting crawl telemetry...</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ==========================================
+             VIEW: USER CRAWL
+             ========================================== -->
+        <section id="view-user-crawl" class="view">
+            <button class="btn-back" onclick="showView('view-welcome')">&#9664; BACK TO MENU</button>
+            <div class="glass-panel" style="max-width: 800px; margin: 0 auto;">
+                <h2 style="margin-bottom: 25px; color: var(--neon-cyan);">USER TARGETED CRAWL</h2>
+                
+                <div class="form-group">
+                    <label>Forum URL</label>
+                    <input type="text" id="usr-url" placeholder="https://forum.example.onion">
+                </div>
+                
+                <div class="grid-2">
+                    <div class="form-group">
+                        <label>Target Username</label>
+                        <input type="text" id="usr-username" placeholder="Leave blank to auto-detect if profile URL">
+                    </div>
+                    <div class="form-group">
+                        <label>Max Pages</label>
+                        <input type="number" id="usr-pages" value="30">
+                    </div>
+                </div>
+                
+                <div class="btn-row">
+                    <button class="btn btn-primary" id="btn-usr-start" onclick="startUserCrawl()">START CRAWL</button>
+                    <button class="btn btn-danger" id="btn-usr-stop" onclick="stopCrawl()" disabled>STOP</button>
+                    <button class="btn btn-muted" onclick="resetForm('usr')">RESET</button>
+                </div>
+                
+                <div class="progress-section" id="usr-progress-area">
+                    <div class="progress-bar-container">
+                        <div class="progress-bar-fill" id="usr-progress-bar"></div>
+                    </div>
+                                        <div class="stats-panel">
+                        <div>Status: <span id="usr-status-text">Initializing...</span></div>
+                        <div>Posts Found: <span id="usr-posts-count">0</span></div>
+                    </div>
+                    <div id="usr-log-container" style="margin-top: 15px; background: rgba(0,0,0,0.2); border: 1px solid var(--glass-border); border-radius: 4px; padding: 10px; height: 120px; overflow-y: auto; font-size: 0.9rem; font-family: 'Rajdhani', sans-serif; display: flex; flex-direction: column; gap: 4px;">
+                        <div style="color: var(--text-muted); font-style: italic;">Awaiting crawl telemetry...</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ==========================================
+             VIEW: IDENTITY HUB
+             ========================================== -->
+        <section id="view-identity-hub" class="view">
+            <button class="btn-back" onclick="showView('view-welcome')">&#9664; BACK TO MENU</button>
+            <h2 style="text-align: center; margin-bottom: 30px; color: var(--neon-cyan);">IDENTITY ENGINE</h2>
+            
+            <div class="grid-2" style="max-width: 1000px; margin: 0 auto;">
+                <div class="cyber-card" onclick="showView('view-browse-users')">
+                    <div class="icon">&#128193;</div>
+                    <h3>Browse Database</h3>
+                    <p>Explore stored identities by platform</p>
+                </div>
+                
+                <div class="cyber-card" onclick="showView('view-crawl-compare')">
+                    <div class="icon">&#128279;</div>
+                    <h3>Crawl & Compare</h3>
+                    <p>Crawl a profile and match against database</p>
+                </div>
+                
+                <div class="cyber-card" onclick="showView('view-pair-compare')">
+                    <div class="icon">&#9889;</div>
+                    <h3>Pairwise Match</h3>
+                    <p>Compare two specific users</p>
+                </div>
+                
+                <div class="cyber-card" onclick="showView('view-identity-graph')">
+                    <div class="icon">&#128376;</div>
+                    <h3>Identity Graph</h3>
+                    <p>Visualize cross-platform clusters</p>
+                </div>
+            </div>
+            
+            <div style="text-align: center; margin-top: 40px;">
+                <button class="btn btn-primary" onclick="startManualTraining()" style="padding: 15px 40px; font-size: 1.2rem; border-radius: 4px;">&#9881; MANUALLY TRAIN MODEL</button>
+            </div>
+        </section>
+
+        <!-- ==========================================
+             VIEW: BROWSE USERS
+             ========================================== -->
+        <section id="view-browse-users" class="view">
+            <button class="btn-back" onclick="showView('view-identity-hub')">&#9664; BACK TO ENGINE</button>
+            <div class="glass-panel">
+                <h2 style="margin-bottom: 20px;">USER DATABASE</h2>
+                <input type="text" id="search-users" placeholder="Filter by username or platform..." onkeyup="filterUsers()" style="margin-bottom: 25px;">
+                
+                <div id="platforms-container">
+                    <!-- Platform cards injected here -->
+                </div>
+            </div>
+        </section>
+
+        <!-- ==========================================
+             VIEW: PAIRWISE COMPARE
+             ========================================== -->
+        <section id="view-pair-compare" class="view">
+            <button class="btn-back" onclick="showView('view-identity-hub')">&#9664; BACK TO ENGINE</button>
+            <div class="glass-panel" style="max-width: 900px; margin: 0 auto;">
+                <h2 style="margin-bottom: 25px;">PAIRWISE IDENTITY MATCH</h2>
+                
+                <div class="grid-2">
+                    <div class="form-group">
+                        <label>USER A</label>
+                        <select id="user-a-select">
+                            <option value="">Select a user...</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>USER B</label>
+                        <select id="user-b-select">
+                            <option value="">Select a user...</option>
+                        </select>
+                    </div>
+                </div>
+                
+                <div class="grid-3" style="margin-top: 20px;">
+                    <div class="form-group">
+                        <label>MATCH THRESHOLD (DEFAULT: 0.8)</label>
+                        <input type="number" id="match-threshold" value="0.8" step="0.05" min="0" max="1">
+                    </div>
+                    <div class="form-group">
+                        <label>MISMATCH THRESHOLD (DEFAULT: 0.3)</label>
+                        <input type="number" id="mismatch-threshold" value="0.3" step="0.05" min="0" max="1">
+                    </div>
+                    <div class="form-group">
+                        <label>COSINE TIE-BREAKER (DEFAULT: 0.85)</label>
+                        <input type="number" id="cosine-tie-breaker" value="0.85" step="0.05" min="0" max="1">
+                    </div>
+                </div>
+                
+                <div style="text-align: center; margin-top: 20px;">
+                    <button class="btn btn-magenta" onclick="runPairwiseCompare()" style="width: 100%; max-width: 300px;">RESOLVE IDENTITY</button>
+                </div>
+                
+                <div class="compare-result-area" id="compare-result">
+                    <svg viewBox="0 0 200 120" width="300">
+                        <path class="gauge-bg" d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="#1a1a2e" stroke-width="12" />
+                        <path id="gauge-fill" class="gauge-fill" d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="var(--neon-cyan)" stroke-width="12" stroke-dasharray="0 251" />
+                        <text id="gauge-score" x="100" y="85" text-anchor="middle" class="gauge-score">0.00</text>
+                        <text x="100" y="110" text-anchor="middle" class="gauge-label">SCORE</text>
+                    </svg>
+                    
+                    <div>
+                        <span id="verdict-badge" class="verdict-badge verdict-unc">UNCERTAIN</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ==========================================
+             VIEW: IDENTITY GRAPH
+             ========================================== -->
+        <section id="view-identity-graph" class="view">
+            <button class="btn-back" onclick="showView('view-identity-hub')">&#9664; BACK TO ENGINE</button>
+            <div class="glass-panel">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 15px;">
+                    <h2>IDENTITY NETWORK GRAPH</h2>
+                    <div style="display: flex; align-items: center; gap: 15px;">
+                        <label for="graph-threshold" style="color: var(--neon-cyan); font-family: 'Orbitron', sans-serif;">Similarity Threshold: <span id="thresh-val">0.30</span></label>
+                        <input type="range" id="graph-threshold" min="0.1" max="0.9" step="0.05" value="0.30" oninput="document.getElementById('thresh-val').innerText=Number(this.value).toFixed(2)">
+                        <button class="btn btn-primary" onclick="generateGraph()">GENERATE GRAPH</button>
+                    </div>
+                </div>
+                
+                <div id="network-container">
+                    <div class="spinner" id="graph-spinner"></div>
+                    <div id="network-canvas" style="width: 100%; height: 100%;"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ==========================================
+             VIEW: CRAWL & COMPARE
+             ========================================== -->
+        <section id="view-crawl-compare" class="view">
+            <button class="btn-back" onclick="showView('view-identity-hub')">&#9664; BACK TO ENGINE</button>
+            <div class="glass-panel" style="max-width: 800px; margin: 0 auto;">
+                <h2 style="margin-bottom: 25px; color: var(--neon-cyan);">CRAWL & COMPARE</h2>
+                <p style="color: var(--text-muted); margin-bottom: 20px;">Combines targeted crawling with immediate identity matching against the database.</p>
+                
+                <!-- Same form as user crawl but with compare logic after -->
+                <div class="form-group">
+                    <label>Forum URL</label>
+                    <input type="text" id="cc-url" placeholder="https://forum.example.onion">
+                </div>
+                <div class="form-group">
+                    <label>Target Username</label>
+                    <input type="text" id="cc-username">
+                </div>
+                
+                <div class="btn-row">
+                    <button class="btn btn-primary" id="btn-cc-start" onclick="startCrawlCompare()">START WORKFLOW</button>
+                </div>
+                
+                <div class="progress-section" id="cc-progress-area">
+                    <div class="progress-bar-container">
+                        <div class="progress-bar-fill" id="cc-progress-bar"></div>
+                    </div>
+                                        <div class="stats-panel">
+                        <div>Status: <span id="cc-status-text">Initializing...</span></div>
+                    </div>
+                    <div id="cc-log-container" style="margin-top: 15px; background: rgba(0,0,0,0.2); border: 1px solid var(--glass-border); border-radius: 4px; padding: 10px; height: 120px; overflow-y: auto; font-size: 0.9rem; font-family: 'Rajdhani', sans-serif; display: flex; flex-direction: column; gap: 4px;">
+                        <div style="color: var(--text-muted); font-style: italic;">Awaiting crawl telemetry...</div>
+                    </div>
+                </div>
+
+                <div id="cc-compare-area" style="display:none; margin-top: 30px; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 20px;">
+                    <h3>COMPARE RESULTS</h3>
+                    <button class="btn btn-magenta" onclick="runCcCompareAll()" style="margin: 15px 0;">COMPARE VS ALL USERS</button>
+                    <div id="cc-results" style="margin-top: 15px;"></div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- ==========================================
+         MODAL: TRAINING PROMPT
+         ========================================== -->
+    <div id="train-modal" class="modal-overlay">
+        <div class="modal-content">
+            <div class="modal-header">TRAIN IDENTITY MODEL?</div>
+            
+            <!-- State 1: Prompt -->
+            <div id="train-state-prompt">
+                <div class="modal-body">
+                    <p>New data has been collected. Training the model on your latest data improves identity match accuracy.</p>
+                    <div class="form-group" style="margin-top: 20px; text-align: left;">
+                        <label style="color: var(--neon-cyan);">LDA TOPIC COUNT (DEFAULT: 20)</label>
+                        <input type="number" id="train-lda-topics" value="20" min="5" max="100">
+                    </div>
+                </div>
+                <div class="btn-row" style="justify-content: center; margin-top: 30px;">
+                    <button class="btn btn-primary" onclick="executeTraining()">TRAIN NOW</button>
+                    <button class="btn btn-muted" onclick="skipTraining()">SKIP</button>
+                </div>
+            </div>
+
+            <!-- State 2: Progress -->
+            <div id="train-state-progress" style="display:none; text-align: center;">
+                <div class="spinner" style="display: block;"></div>
+                <p style="margin-top: 20px; font-family: 'Orbitron', sans-serif; color: var(--neon-cyan);" id="train-status-text">Initializing Model...</p>
+            </div>
+
+            <!-- State 3: Complete -->
+            <div id="train-state-complete" style="display:none; text-align: center;">
+                <div style="font-size: 3rem; color: var(--success); margin-bottom: 15px;">&#10003;</div>
+                <h3 style="color: #fff; margin-bottom: 20px;">TRAINING COMPLETE</h3>
+                <div style="text-align: left; background: rgba(0,0,0,0.4); padding: 15px; border-radius: 4px; margin-bottom: 20px;">
+                    <p>ROC-AUC Score: <span class="val" id="train-res-auc">0.00</span></p>
+                    <p>Pairs Generated: <span class="val" id="train-res-pairs">0</span></p>
+                    <p>Model Version: <span class="val" id="train-res-version">v...</span></p>
+                </div>
+                <button class="btn btn-magenta" onclick="closeTrainModal()">CONTINUE</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ==========================================
+         MODAL: CAPTCHA ACTION REQUIRED
+         ========================================== -->
+    <div id="captcha-modal" class="modal-overlay">
+        <div class="modal-content" style="border: 2px solid var(--warning); box-shadow: 0 0 20px rgba(255,170,0,0.5);">
+            <div class="modal-header" style="color: var(--warning);">ACTION REQUIRED</div>
+            <div class="modal-body">
+                <p style="font-size: 1.1em; text-align: center;">A CAPTCHA or Login wall was detected!</p>
+                <p style="text-align: center; color: var(--text-muted); margin-bottom: 20px;">A visible browser window has opened on your screen. Please solve the challenge there, wait for the forum content to load, and then click RESUME.</p>
+                
+                <div class="btn-row" style="justify-content: center; gap: 10px;">
+                    <button class="btn btn-primary" onclick="resolveCaptcha('resume')">RESUME CRAWL</button>
+                    <button class="btn btn-muted" onclick="resolveCaptcha('new')">NEW IDENTITY</button>
+                    <button class="btn btn-muted" style="border-color: var(--danger); color: var(--danger);" onclick="resolveCaptcha('exit')">ABORT</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ==========================================
+         SCRIPTS
+         ========================================== -->
+    <script>
+        // --- State ---
+        let crawlInterval = null;
+        let trainInterval = null;
+        let currentCrawlPrefix = null; // 'gen', 'usr', 'cc'
+        
+        let allUsersCache = {};
+        
+        // --- Core ---
+        async function apiCall(endpoint, method = 'GET', body = null) {
+            try {
+                const options = { method, headers: {} };
+                if (body) {
+                    options.headers['Content-Type'] = 'application/json';
+                    options.body = JSON.stringify(body);
+                }
+                const res = await fetch(endpoint, options);
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.error || 'API Error');
+                return data;
+            } catch (err) {
+                console.error(err);
+                alert("Error: " + err.message);
+                throw err;
+            }
+        }
+
+        // --- Navigation ---
+        function showView(viewId) {
+            document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+            document.getElementById(viewId).classList.add('active');
+            
+            if (viewId === 'view-browse-users') loadBrowseUsers();
+            if (viewId === 'view-pair-compare') loadPairDropdowns();
+            if (viewId === 'view-identity-graph') ensureVisJs();
+        }
+
+        // --- Initialization ---
+        document.addEventListener('DOMContentLoaded', () => {
+            loadGlobalStats();
+            checkModelStatus();
+        });
+
+        async function loadGlobalStats() {
+            try {
+                const data = await apiCall('/api/stats');
+                document.getElementById('stat-platforms').innerText = data.platforms || 0;
+                document.getElementById('stat-profiles').innerText = data.profiles || 0;
+                document.getElementById('stat-posts').innerText = data.posts || 0;
+            } catch(e) {}
+        }
+
+        async function checkModelStatus() {
+            try {
+                const data = await apiCall('/api/model/status');
+                if (data.is_stale || !data.is_trained) {
+                    document.getElementById('stale-banner').classList.remove('hidden');
+                }
+            } catch(e) {}
+        }
+
+        function dismissBanner() {
+            document.getElementById('stale-banner').classList.add('hidden');
+        }
+
+        // --- Crawl Logic ---
+        async function startCrawl(prefix, endpoint, body) {
+            // UI Reset
+            currentCrawlPrefix = prefix;
+            document.getElementById(`btn-${prefix}-start`).disabled = true;
+            document.getElementById(`btn-${prefix}-stop`).disabled = false;
+            document.getElementById(`${prefix}-progress-area`).style.display = 'block';
+            document.getElementById(`${prefix}-progress-bar`).style.width = '100%'; // indeterminate shimmer
+            document.getElementById(`${prefix}-status-text`).innerText = 'Starting...';
+            
+            try {
+                await apiCall(endpoint, 'POST', body);
+                // Start polling
+                crawlInterval = setInterval(pollCrawl, 2000);
+            } catch(e) {
+                resetForm(prefix);
+            }
+        }
+
+        function startGeneralCrawl() {
+            const body = {
+                url: document.getElementById('gen-url').value,
+                max_pages: parseInt(document.getElementById('gen-pages').value),
+                max_threads: parseInt(document.getElementById('gen-threads').value)
+            };
+            if(!body.url) return alert("URL required");
+            startCrawl('gen', '/api/crawl/general', body);
+        }
+
+        function startUserCrawl() {
+            const body = {
+                url: document.getElementById('usr-url').value,
+                username: document.getElementById('usr-username').value,
+                max_pages: parseInt(document.getElementById('usr-pages').value)
+            };
+            if(!body.url) return alert("URL required");
+            startCrawl('usr', '/api/crawl/user', body);
+        }
+        
+        function startCrawlCompare() {
+            const body = {
+                url: document.getElementById('cc-url').value,
+                username: document.getElementById('cc-username').value,
+                max_pages: 15
+            };
+            if(!body.url) return alert("URL required");
+            document.getElementById('cc-compare-area').style.display = 'none';
+            startCrawl('cc', '/api/crawl/user', body);
+        }
+
+        async function stopCrawl() {
+            if(!currentCrawlPrefix) return;
+            await apiCall('/api/crawl/stop', 'POST');
+            document.getElementById(`${currentCrawlPrefix}-status-text`).innerText = 'Stopping...';
+        }
+
+        async function pollCrawl() {
+            if(!currentCrawlPrefix) return;
+            try {
+                const state = await apiCall('/api/crawl/status');
+                
+                let statusText = state.status;
+                if (state.elapsed_seconds !== undefined) {
+                    const m = Math.floor(state.elapsed_seconds / 60);
+                    const s = state.elapsed_seconds % 60;
+                    statusText += ` (${m}m ${s}s)`;
+                }
+                                if (state.log && state.log.length > 0) {
+                    const logContainer = document.getElementById(`${currentCrawlPrefix}-log-container`);
+                    if (logContainer) {
+                        const formattedLogs = state.log.map(msg => {
+                            let color = 'var(--text-primary)';
+                            if (msg.includes('[-]')) color = 'var(--danger)';
+                            else if (msg.includes('[!]')) color = 'var(--warning)';
+                            else if (msg.includes('[+]') || msg.toLowerCase().includes('found')) color = 'var(--success)';
+                            
+                            const cleanMsg = msg.replace(/^\[.*?\]\s*/, '');
+                            return `<div style="color: ${color}; border-left: 2px solid ${color}; padding-left: 8px;">${cleanMsg}</div>`;
+                        });
+                        logContainer.innerHTML = formattedLogs.join('');
+                        logContainer.scrollTop = logContainer.scrollHeight;
+                    }
+                } else {
+                    const logContainer = document.getElementById(`${currentCrawlPrefix}-log-container`);
+                    if (logContainer) {
+                        logContainer.innerHTML = '';
+                    }
+                }
+                document.getElementById(`${currentCrawlPrefix}-status-text`).innerText = statusText;
+                
+                const countEl = document.getElementById(`${currentCrawlPrefix}-posts-count`);
+                if(countEl) {
+                    countEl.innerText = state.result ? state.result.posts_found : (state.posts_found || 0);
+                }
+
+                if (state.status === "captcha_pending") {
+                    document.getElementById('captcha-modal').classList.add('active');
+                } else {
+                    document.getElementById('captcha-modal').classList.remove('active');
+                }
+
+                if (!state.running && state.status !== "idle" && state.status !== "captcha_pending") {
+                    clearInterval(crawlInterval);
+                    document.getElementById(`btn-${currentCrawlPrefix}-start`).disabled = false;
+                    document.getElementById(`btn-${currentCrawlPrefix}-stop`).disabled = true;
+                    document.getElementById(`${currentCrawlPrefix}-progress-bar`).style.animation = 'none';
+                    
+                    if (state.error) {
+                        alert("Crawl failed: " + state.error);
+                    } else {
+                        // Success!
+                        loadGlobalStats();
+                        if (currentCrawlPrefix === 'cc') {
+                            document.getElementById('cc-compare-area').style.display = 'block';
+                        }
+                        showTrainModal(); // Prompt for training
+                    }
+                }
+            } catch(e) {
+                clearInterval(crawlInterval);
+            }
+        }
+
+        function resetForm(prefix) {
+            document.getElementById(`${prefix}-progress-area`).style.display = 'none';
+            document.getElementById(`btn-${prefix}-start`).disabled = false;
+            document.getElementById(`btn-${prefix}-stop`).disabled = true;
+        }
+
+        async function resolveCaptcha(action) {
+            document.getElementById('captcha-modal').classList.remove('active');
+            try {
+                await apiCall('/api/crawl/captcha_action', 'POST', { action: action });
+            } catch(e) {
+                alert("Failed to send action: " + e);
+            }
+        }
+
+        // --- Training Modal ---
+        function showTrainModal() {
+            document.getElementById('train-state-prompt').style.display = 'block';
+            document.getElementById('train-state-progress').style.display = 'none';
+            document.getElementById('train-state-complete').style.display = 'none';
+            document.getElementById('train-modal').classList.add('active');
+        }
+
+        function closeTrainModal() {
+            document.getElementById('train-modal').classList.remove('active');
+            checkModelStatus(); // Updates banner if needed
+        }
+
+        function skipTraining() {
+            closeTrainModal();
+        }
+        
+        function startManualTraining() {
+            dismissBanner();
+            showTrainModal();
+            executeTraining();
+        }
+
+        async function executeTraining() {
+            document.getElementById('train-state-prompt').style.display = 'none';
+            document.getElementById('train-state-progress').style.display = 'block';
+            
+            try {
+                const ldaTopics = document.getElementById('train-lda-topics').value || 20;
+                await apiCall('/api/model/train', 'POST', { lda_topics: parseInt(ldaTopics) });
+                trainInterval = setInterval(pollTraining, 2000);
+            } catch (e) {
+                closeTrainModal();
+            }
+        }
+
+        async function pollTraining() {
+            try {
+                const state = await apiCall('/api/model/train/status');
+                document.getElementById('train-status-text').innerText = state.status;
+                
+                if (!state.running && state.status !== "idle") {
+                    clearInterval(trainInterval);
+                    if (state.error) {
+                        alert("Training failed: " + state.error);
+                        closeTrainModal();
+                    } else {
+                        document.getElementById('train-state-progress').style.display = 'none';
+                        document.getElementById('train-state-complete').style.display = 'block';
+                        
+                        const m = state.metrics || {};
+                        document.getElementById('train-res-auc').innerText = (m.cv_roc_auc_mean || m.train_roc_auc || 0).toFixed(4);
+                        document.getElementById('train-res-pairs').innerText = m.n_pairs || 0;
+                        document.getElementById('train-res-version').innerText = m.model_version || 'unknown';
+                        
+                        dismissBanner();
+                    }
+                }
+            } catch(e) {
+                clearInterval(trainInterval);
+                closeTrainModal();
+            }
+        }
+
+        // --- Browse Users ---
+        async function loadBrowseUsers() {
+            try {
+                const data = await apiCall('/api/users');
+                allUsersCache = data;
+                renderPlatforms(data);
+            } catch(e) {}
+        }
+        
+        function renderPlatforms(data, filterQuery = '') {
+            const container = document.getElementById('platforms-container');
+            container.innerHTML = '';
+            
+            const q = filterQuery.toLowerCase();
+            
+            for (const forum of Object.keys(data).sort()) {
+                let users = data[forum];
+                
+                // Filter
+                if (q) {
+                    if (!forum.toLowerCase().includes(q)) {
+                        users = users.filter(u => u.username.toLowerCase().includes(q));
+                        if (users.length === 0) continue;
+                    }
+                }
+                
+                const platformCard = document.createElement('div');
+                platformCard.className = 'platform-card';
+                
+                platformCard.innerHTML = `
+                    <div class="platform-header" onclick="this.nextElementSibling.classList.toggle('active')">
+                        <span>🌐 ${forum}</span>
+                        <span style="color:var(--text-muted)">${users.length} profiles &#9660;</span>
+                    </div>
+                    <div class="platform-body ${q ? 'active' : ''}">
+                        <div class="user-grid">
+                            ${users.map(u => `
+                                <div class="user-tag">
+                                    <div class="u-name">${u.username}</div>
+                                    <div class="u-posts">${u.post_count || '?'} posts</div>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+                container.appendChild(platformCard);
+            }
+        }
+        
+        let searchTimeout;
+        function filterUsers() {
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(() => {
+                const q = document.getElementById('search-users').value;
+                renderPlatforms(allUsersCache, q);
+            }, 300);
+        }
+
+        // --- Pairwise Compare ---
+        async function loadPairDropdowns() {
+            try {
+                const data = await apiCall('/api/users');
+                let optionsHtml = '<option value="">Select a user...</option>';
+                
+                for (const forum of Object.keys(data).sort()) {
+                    const group = `<optgroup label="${forum}">`;
+                    const opts = data[forum].map(u => 
+                        `<option value="${u.username}|${forum}">${u.username} (${u.post_count} posts)</option>`
+                    ).join('');
+                    optionsHtml += group + opts + '</optgroup>';
+                }
+                
+                document.getElementById('user-a-select').innerHTML = optionsHtml;
+                document.getElementById('user-b-select').innerHTML = optionsHtml;
+            } catch(e) {}
+        }
+
+        async function runPairwiseCompare() {
+            const valA = document.getElementById('user-a-select').value;
+            const valB = document.getElementById('user-b-select').value;
+            
+            if(!valA || !valB) return alert("Select both users");
+            
+            const [uA, fA] = valA.split('|');
+            const [uB, fB] = valB.split('|');
+            
+            if(uA === uB && fA === fB) return alert("Select different users");
+            
+            try {
+                document.getElementById('compare-result').style.display = 'block';
+                document.getElementById('gauge-score').textContent = "...";
+                document.getElementById('gauge-fill').setAttribute('stroke-dasharray', `0 251`);
+                
+                const matchThresh = parseFloat(document.getElementById('match-threshold').value) || 0.8;
+                const mismatchThresh = parseFloat(document.getElementById('mismatch-threshold').value) || 0.3;
+                const tieBreaker = parseFloat(document.getElementById('cosine-tie-breaker').value) || 0.85;
+                
+                const res = await apiCall('/api/compare/pair', 'POST', {
+                    user_a: uA, forum_a: fA, user_b: uB, forum_b: fB,
+                    match_threshold: matchThresh,
+                    mismatch_threshold: mismatchThresh,
+                    cosine_tie_breaker: tieBreaker
+                });
+                
+                const score = res.score;
+                const dashLen = score * 251;
+                
+                // Animate gauge
+                setTimeout(() => {
+                    document.getElementById('gauge-fill').setAttribute('stroke-dasharray', `${dashLen} 251`);
+                    document.getElementById('gauge-score').textContent = score.toFixed(2);
+                }, 100);
+                
+                // Verdict badge
+                const badge = document.getElementById('verdict-badge');
+                badge.innerText = res.verdict || "UNKNOWN";
+                badge.className = "verdict-badge";
+                if(score > 0.7) badge.classList.add('verdict-same');
+                else if (score >= 0.4) badge.classList.add('verdict-unc');
+                else badge.classList.add('verdict-diff');
+                
+            } catch(e) {}
+        }
+        
+        async function runCcCompareAll() {
+            const targetUsername = document.getElementById('cc-username').value;
+            // Derive forum from URL naively or assume we have it. 
+            // The crawler saves it to DB. Let's just ask the user to type the exact username and forum.
+            // For a robust implementation, the crawler response should return the detected forum.
+            const url = document.getElementById('cc-url').value;
+            let forum = url;
+            try { forum = new URL(url).hostname; } catch(e){}
+            
+            const username = prompt(`Confirm target username to compare:`, targetUsername);
+            const frm = prompt(`Confirm forum hostname:`, forum);
+            
+            if(!username || !frm) return;
+            
+            try {
+                const res = await apiCall('/api/compare/all', 'POST', {
+                    username: username,
+                    forum: frm,
+                    top_n: 10
+                });
+                
+                let html = '<h4>Top Matches</h4><div style="display:flex; flex-direction:column; gap:10px; margin-top:15px;">';
+                for(const match of res) {
+                    const color = match.score > 0.7 ? 'var(--success)' : (match.score > 0.4 ? 'var(--warning)' : 'var(--danger)');
+                    html += `
+                        <div style="background:rgba(0,0,0,0.5); padding:10px; border-left:4px solid ${color}; display:flex; justify-content:space-between;">
+                            <span>${match.username} @ ${match.forum}</span>
+                            <strong style="color:${color}">${match.score.toFixed(3)}</strong>
+                        </div>
+                    `;
+                }
+                html += '</div>';
+                document.getElementById('cc-results').innerHTML = html;
+            } catch(e) {}
+        }
+
+        // --- Identity Graph ---
+        let visJsLoaded = false;
+        function ensureVisJs() {
+            if (visJsLoaded) return;
+            const script = document.createElement('script');
+            script.src = "https://unpkg.com/vis-network@9.1.6/standalone/umd/vis-network.min.js";
+            script.onload = () => { visJsLoaded = true; };
+            document.head.appendChild(script);
+        }
+
+        async function generateGraph() {
+            if (!visJsLoaded) return alert("Waiting for visualization library to load...");
+            
+            const thresh = document.getElementById('graph-threshold').value;
+            const spinner = document.getElementById('graph-spinner');
+            const canvas = document.getElementById('network-canvas');
+            
+            spinner.style.display = 'block';
+            canvas.style.display = 'none';
+            
+            try {
+                const data = await apiCall(`/api/compare/graph?threshold=${thresh}`);
+                
+                // Prepare vis.js data and add size scaling based on post_count
+                const nodesData = (data.nodes || []).map(n => {
+                    n.value = n.post_count || 1;
+                    return n;
+                });
+                const nodes = new vis.DataSet(nodesData);
+                const edges = new vis.DataSet(data.edges || []);
+                
+                const container = document.getElementById('network-canvas');
+                const graphData = { nodes, edges };
+                const options = {
+                    nodes: {
+                        shape: 'dot',
+                        scaling: {
+                            min: 10,
+                            max: 40
+                        },
+                        font: { color: '#e0e0ff', face: 'Rajdhani' },
+                        borderWidth: 2
+                    },
+                    edges: {
+                        color: { inherit: false },
+                        smooth: { type: 'continuous' }
+                    },
+                    physics: {
+                        solver: 'barnesHut',
+                        barnesHut: {
+                            gravitationalConstant: -2000,
+                            centralGravity: 0.3,
+                            springLength: 95,
+                            springConstant: 0.04,
+                            damping: 0.09,
+                            avoidOverlap: 0.2
+                        },
+                        maxVelocity: 50,
+                        timestep: 0.35,
+                        stabilization: { iterations: 150 }
+                    }
+                };
+                
+                const network = new vis.Network(container, graphData, options);
+                
+                // Disable physics after initial layout so nodes stay where they are dragged
+                network.on("stabilizationIterationsDone", function() {
+                    network.setOptions({ physics: { enabled: false } });
+                });
+                
+                // Also disable on drag just in case
+                network.on("dragStart", function(params) {
+                    if (params.nodes.length > 0) {
+                        network.setOptions({ physics: { enabled: false } });
+                    }
+                });
+                
+                spinner.style.display = 'none';
+                canvas.style.display = 'block';
+                
+            } catch(e) {
+                spinner.style.display = 'none';
+            }
+        }
+
+    </script>
+</body>
+</html>
+

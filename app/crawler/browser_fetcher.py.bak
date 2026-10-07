@@ -1,0 +1,721 @@
+"""
+Playwright-based fetcher module.
+
+Replaces the 'requests' based fetcher to overcome advanced anti-bot
+protections (DDoS-Guard, EndGame, Cloudflare) that rely on TLS fingerprinting
+and Javascript execution checks.
+
+Features:
+  - Runs a real headless Chromium browser
+  - Routes traffic through Tor SOCKS5 proxy
+  - Rotating user-agents per session
+  - Human-like behavior simulation (scroll, mouse, viewport)
+  - Human-in-the-loop: Temporarily opens a visible browser window when a 
+    CAPTCHA or wait queue is detected, letting you solve it manually before 
+    seamlessly resuming the scrape with the authenticated session.
+"""
+
+import time
+import random
+import os
+import threading
+import requests
+from playwright.sync_api import sync_playwright
+try:
+    from playwright_stealth import stealth_sync
+except ImportError:
+    from playwright_stealth import stealth as stealth_sync
+
+
+# ── Tor Configuration (merged from fetcher.py) ──────────────────
+
+USE_TOR = False    # change to True when Tor is configured
+
+TOR_PROXY = "socks5://127.0.0.1:9150"
+
+# socks5h variant for requests library (DNS resolution through Tor)
+_TOR_PROXY_REQUESTS = "socks5h://127.0.0.1:9150"
+_requests_proxies = {
+    "http": _TOR_PROXY_REQUESTS,
+    "https": _TOR_PROXY_REQUESTS
+} if USE_TOR else None
+
+# Challenge page indicators (site returned 200 but content is a challenge)
+CHALLENGE_INDICATORS = [
+    "captcha", "ddos-guard", "cloudflare", "challenge",
+    "enable javascript", "please wait", "checking your browser",
+    "endgame", "just a moment",  # common onion anti-DDoS services
+    "placed in a queue", "estimated wait time",  # queue pages
+    "session expired", "bot-like behavio", "new session",  # bot detection
+    "log in to x", "sign in to x", "sign up for x",  # X/Twitter login walls
+]
+
+STATE_FILE = "browser_state.json"
+
+_playwright_context = None
+_browser = None
+_context = None
+_page = None
+
+DASHBOARD_MODE = False
+dashboard_captcha_event = threading.Event()
+dashboard_captcha_action = None
+
+# Track consecutive failures for adaptive behavior
+_consecutive_failures = 0
+
+
+# ── Tor Utilities (merged from fetcher.py) ───────────────────────
+
+def check_tor():
+    """Verify Tor connection is working."""
+    if not USE_TOR:
+        print("[!] Tor disabled — running in clearnet mode")
+        return False
+
+    try:
+        r = requests.get(
+            "https://check.torproject.org/api/ip",
+            proxies=_requests_proxies,
+            timeout=15
+        )
+        data = r.json()
+        if data.get("IsTor"):
+            print(f"[+] Tor OK | Exit IP: {data.get('IP')}")
+            return True
+        else:
+            print(f"[!] Connected but NOT through Tor | IP: {data.get('IP')}")
+            return False
+    except Exception as e:
+        print(f"[-] Tor connection failed: {e}")
+        return False
+
+
+def renew_tor_circuit():
+    """Request a new Tor circuit (new exit node = new IP).
+    
+    Useful when a site blocks your current exit node.
+    Requires ControlPort 9051 to be enabled in torrc.
+    """
+    try:
+        from stem import Signal
+        from stem.control import Controller
+        
+        with Controller.from_port(port=9051) as controller:
+            controller.authenticate()
+            controller.signal(Signal.NEWNYM)
+            print("[+] New Tor circuit requested — waiting 10s for build...")
+            time.sleep(10)  # circuits take time to build
+            return True
+    except ImportError:
+        print("[-] 'stem' library not installed — cannot renew circuit")
+        return False
+    except Exception as e:
+        print(f"[-] Circuit renewal failed: {e}")
+        return False
+
+
+# ── User-Agent Rotation Pool ─────────────────────────────────────
+
+# For .onion sites: Tor Browser variants (same family, slight version variation)
+# All Tor Browser users share this UA family — rotating too wildly is suspicious.
+TOR_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0",
+    "Mozilla/5.0 (Windows NT 10.0; rv:115.0) Gecko/20100101 Firefox/115.0",
+    "Mozilla/5.0 (Windows NT 10.0; rv:109.0) Gecko/20100101 Firefox/109.0",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:115.0) Gecko/20100101 Firefox/115.0",
+]
+
+# For clearnet: realistic modern browser UAs
+CLEARNET_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:130.0) Gecko/20100101 Firefox/130.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+]
+
+# Common viewport sizes to rotate between
+VIEWPORT_SIZES = [
+    {"width": 1920, "height": 1080},
+    {"width": 1366, "height": 768},
+    {"width": 1536, "height": 864},
+    {"width": 1440, "height": 900},
+    {"width": 1280, "height": 720},
+    {"width": 1600, "height": 900},
+]
+
+
+# ── De-duplicated constants & helpers ────────────────────────────
+
+# Stealth init script — extracted from 3 identical copies
+_STEALTH_INIT_SCRIPT = """
+    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+    Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+    Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+    window.chrome = { runtime: {} };
+"""
+
+
+def _get_random_ua():
+    """Select a random user-agent based on whether Tor is enabled."""
+    if USE_TOR:
+        return random.choice(TOR_USER_AGENTS)
+    return random.choice(CLEARNET_USER_AGENTS)
+
+
+def _get_random_viewport():
+    """Select a random viewport size from common screen resolutions."""
+    return random.choice(VIEWPORT_SIZES)
+
+
+def _is_challenge_page(html):
+    """Detect if the response is a CAPTCHA/challenge page."""
+    if not html or len(html) < 100:
+        return True
+    lower = html[:2000].lower()
+    return any(indicator in lower for indicator in CHALLENGE_INDICATORS)
+
+
+def _build_launch_args():
+    """Build Chromium launch arguments with optional Tor proxy.
+    
+    Extracted to eliminate 3 identical copies of launch-arg construction.
+    """
+    args = ["--disable-blink-features=AutomationControlled"]
+    if USE_TOR:
+        # CRITICAL: Set the proxy at the browser level AND force DNS through it.
+        # Without --proxy-server + --host-resolver-rules, Chromium tries to resolve
+        # .onion addresses via local DNS, which always fails because only Tor
+        # can resolve .onion. This causes ERR_SOCKS_CONNECTION_FAILED.
+        args.extend([
+            f"--proxy-server={TOR_PROXY}",
+            "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1",
+        ])
+    return args
+
+
+def _build_context_kwargs(ua, viewport=None, load_state=False):
+    """Build browser context keyword arguments.
+    
+    Extracted to eliminate 3 identical copies of context-kwarg construction.
+    
+    Args:
+        ua: user-agent string
+        viewport: viewport dict or None
+        load_state: if True, load session state from STATE_FILE
+    """
+    proxy = {"server": TOR_PROXY} if USE_TOR else None
+    kwargs = {
+        "proxy": proxy,
+        "user_agent": ua,
+        "ignore_https_errors": True,
+        "locale": "en-US",
+        "timezone_id": "America/New_York",
+    }
+    if viewport:
+        kwargs["viewport"] = viewport
+    if load_state and os.path.exists(STATE_FILE):
+        kwargs["storage_state"] = STATE_FILE
+    return kwargs
+
+
+def _apply_stealth(page):
+    """Apply stealth settings and init script to a page."""
+    stealth_sync(page)
+    page.add_init_script(_STEALTH_INIT_SCRIPT)
+
+
+# Indicators that the site detected bot behavior and killed the session
+_SESSION_EXPIRED_INDICATORS = [
+    "session expired",
+    "session has expired",
+    "bot-like behaviour",
+    "bot like behaviour",
+    "suspicious activity",
+    "automated access",
+    "start with new identity",
+    "new identity",
+    "try again with a new session",
+    "your session was terminated",
+    "inactivity",
+]
+
+
+def _is_session_expired_page(html):
+    """Detect if the page says the session was killed due to bot detection."""
+    if not html:
+        return False
+    lower = html[:3000].lower()
+    return any(indicator in lower for indicator in _SESSION_EXPIRED_INDICATORS)
+
+
+def ensure_clean_browser():
+    """Reset any stale Playwright state. Call before spawning a new crawl thread."""
+    global _playwright_context, _browser, _context, _page
+    try:
+        if _page:
+            try:
+                _page.close()
+            except Exception:
+                pass
+        if _context:
+            try:
+                _context.close()
+            except Exception:
+                pass
+        if _browser:
+            try:
+                _browser.close()
+            except Exception:
+                pass
+        if _playwright_context:
+            try:
+                _playwright_context.stop()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    finally:
+        _playwright_context = None
+        _browser = None
+        _context = None
+        _page = None
+
+
+def init_browser(renew_identity=False):
+    """Initialize the headless Playwright browser with randomized fingerprint.
+    
+    Args:
+        renew_identity: If True, get a new Tor circuit before launching.
+    """
+    global _playwright_context, _browser, _context, _page
+
+    if _playwright_context is not None:
+        return
+
+    # Get a fresh Tor IP on startup or identity renewal
+    if USE_TOR and renew_identity:
+        print("\n[*] Requesting new Tor identity before browser launch...")
+        _try_renew_tor_circuit()
+
+    print("\n[*] Initializing Playwright browser engine...")
+    _playwright_context = sync_playwright().start()
+
+    ua = _get_random_ua()
+    viewport = _get_random_viewport()
+
+    print(f"[*] User-Agent: {ua[:60]}...")
+    print(f"[*] Viewport: {viewport['width']}x{viewport['height']}")
+    if USE_TOR:
+        print(f"[*] Proxy: {TOR_PROXY} (DNS via proxy)")
+
+    _browser = _playwright_context.chromium.launch(
+        headless=True,
+        args=_build_launch_args()
+    )
+
+    context_kwargs = _build_context_kwargs(ua, viewport, load_state=not renew_identity)
+
+    # Only load old session state if NOT renewing identity
+    if not renew_identity and os.path.exists(STATE_FILE):
+        print(f"[*] Loading authenticated session state from {STATE_FILE}")
+
+    _context = _browser.new_context(**context_kwargs)
+    _page = _context.new_page()
+    _apply_stealth(_page)
+
+    # Hide webdriver navigator flag
+    print(f"[*] User-Agent: {ua[:60]}...")
+
+
+def close_browser():
+    """Clean up Playwright resources."""
+    global _playwright_context, _browser, _context, _page
+    if _context:
+        try:
+            _context.storage_state(path=STATE_FILE)
+            print(f"[*] Browser session state saved to {STATE_FILE}")
+        except Exception:
+            pass
+
+    if _browser:
+        _browser.close()
+    if _playwright_context:
+        _playwright_context.stop()
+
+    _playwright_context = None
+    _browser = None
+    _context = None
+    _page = None
+
+
+class CrawlAbortedByUser(Exception):
+    """Raised when the user chooses to abort the crawl during an interactive challenge."""
+    pass
+
+
+class SessionExpired(Exception):
+    """Raised when the site detects bot behavior and invalidates the session.
+    
+    The crawler should catch this, get a new Tor identity, and restart
+    the crawl loop while preserving already-visited URLs.
+    """
+    pass
+
+
+# ── Human-Like Behavior Simulation ───────────────────────────────
+
+def _simulate_human(page):
+    """Simulate human browsing behavior to reduce bot fingerprinting.
+    
+    Actions (randomized):
+      - Random scroll down 30-70% of page
+      - Small mouse movements to random coordinates
+      - Brief pauses between actions
+    """
+    try:
+        # Get page dimensions
+        viewport = page.viewport_size
+        if not viewport:
+            return
+        
+        width = viewport["width"]
+        height = viewport["height"]
+        
+        # 1. Small random pause (human reaction time)
+        time.sleep(random.uniform(0.5, 1.5))
+        
+        # 2. Mouse movement to a random spot (simulates looking around)
+        for _ in range(random.randint(1, 3)):
+            x = random.randint(100, max(101, width - 100))
+            y = random.randint(100, max(101, height - 100))
+            page.mouse.move(x, y)
+            time.sleep(random.uniform(0.1, 0.4))
+        
+        # 3. Scroll down 30-70% of the page
+        scroll_percent = random.uniform(0.3, 0.7)
+        page.evaluate(f"window.scrollTo(0, document.body.scrollHeight * {scroll_percent})")
+        time.sleep(random.uniform(0.5, 1.0))
+        
+        # 4. Occasionally scroll back up a bit (humans do this)
+        if random.random() < 0.3:
+            page.evaluate("window.scrollBy(0, -200)")
+            time.sleep(random.uniform(0.3, 0.6))
+        
+    except Exception:
+        pass  # Non-critical — don't crash on simulation errors
+
+
+def _try_renew_tor_circuit():
+    """Attempt to renew Tor circuit for a new exit IP."""
+    if not USE_TOR:
+        return False
+    try:
+        return renew_tor_circuit()
+    except Exception as e:
+        print(f"[-] Could not renew Tor circuit: {e}")
+        return False
+
+
+def new_identity():
+    """Completely reset browser session and get a new Tor circuit.
+    
+    This is the nuclear option — used when a site detects bot behavior
+    and invalidates the session. It:
+      1. Closes the current browser completely
+      2. Deletes the old session state file (cookies are burned)
+      3. Requests a new Tor circuit (new exit IP)
+      4. Re-launches the browser with a fresh fingerprint
+    """
+    global _playwright_context, _browser, _context, _page
+    
+    print(f"\n{'='*60}")
+    print("[*] STARTING NEW IDENTITY")
+    print(f"{'='*60}")
+    
+    # Step 1: Kill the current browser entirely
+    try:
+        if _browser:
+            _browser.close()
+        if _playwright_context:
+            _playwright_context.stop()
+    except Exception:
+        pass
+    
+    _playwright_context = None
+    _browser = None
+    _context = None
+    _page = None
+    
+    # Step 2: Delete old session state (cookies are compromised)
+    if os.path.exists(STATE_FILE):
+        try:
+            os.remove(STATE_FILE)
+            print("[*] Old session state deleted.")
+        except Exception:
+            pass
+    
+    # Step 3: Launch fresh browser with new Tor circuit
+    init_browser(renew_identity=True)
+    
+    print(f"[*] New identity established.")
+    print(f"{'='*60}\n")
+
+
+# ── CAPTCHA Solving — broken down from monolithic function ───────
+
+def _check_session_status(page):
+    """Check if the current page is a session-expired page.
+    
+    Returns:
+        tuple: (current_html, is_session_dead)
+    """
+    current_html = ""
+    try:
+        if page:
+            current_html = page.content()
+    except Exception:
+        pass
+    return current_html, _is_session_expired_page(current_html)
+
+
+def _launch_visible_browser(url, ua):
+    """Launch a visible browser window for manual CAPTCHA solving.
+    
+    Returns:
+        tuple: (browser, context, page)
+    """
+    print("\n[*] Spawning visible browser window for manual bypass...")
+    _browser_vis = _playwright_context.chromium.launch(
+        headless=False,  # <--- VISIBLE MODE
+        args=_build_launch_args()
+    )
+    
+    context_kwargs = _build_context_kwargs(ua, load_state=True)
+    _context_vis = _browser_vis.new_context(**context_kwargs)
+    _page_vis = _context_vis.new_page()
+    _apply_stealth(_page_vis)
+    
+    try:
+        _page_vis.goto(url, timeout=60000)
+    except Exception as e:
+        print(f"[-] Error loading page in visible browser: {e}")
+    
+    return _browser_vis, _context_vis, _page_vis
+
+
+def _get_user_captcha_choice():
+    """Get the user's choice for how to handle a CAPTCHA/challenge.
+    
+    In dashboard mode, waits for the dashboard API event.
+    In CLI mode, prompts the user interactively.
+    
+    Returns:
+        str: user choice ('exit', 'new', or empty for continue)
+    """
+    if DASHBOARD_MODE:
+        print(">>> [DASHBOARD_CAPTCHA_PENDING]")  # Magic string for dashboard.py to catch
+        # Wait for the dashboard API to trigger the event
+        dashboard_captcha_event.clear()
+        dashboard_captcha_event.wait()
+        return dashboard_captcha_action or 'exit'
+    else:
+        print(">>>")
+        print(">>> Options:")
+        print(">>>   - Press ENTER to continue scraping.")
+        print(">>>   - Type 'new' and press ENTER to get a NEW IDENTITY and restart crawl.")
+        print(">>>   - Type 'exit' and press ENTER to stop scraping and save data.")
+        return input(">>> ").strip().lower()
+
+
+def _resume_headless_browser():
+    """Re-launch headless browser after manual CAPTCHA bypass.
+    
+    Reads the saved state from STATE_FILE and creates a fresh headless session.
+    """
+    global _browser, _context, _page
+    
+    ua = _get_random_ua()
+    viewport = _get_random_viewport()
+    
+    _browser = _playwright_context.chromium.launch(
+        headless=True,
+        args=_build_launch_args()
+    )
+    
+    context_kwargs = _build_context_kwargs(ua, viewport, load_state=True)
+    _context = _browser.new_context(**context_kwargs)
+    _page = _context.new_page()
+    _apply_stealth(_page)
+
+
+def solve_captcha_interactive(url):
+    """
+    Suspends the headless browser, opens a visible browser window, 
+    waits for the user to manually solve the CAPTCHA/Queue, saves 
+    the new authenticated session, and resumes headless mode.
+    
+    If the page is a session-expired/bot-detected page, offers
+    automatic new identity renewal.
+    """
+    global _playwright_context, _browser, _context, _page
+
+    if DASHBOARD_MODE:
+        print("[!] CAPTCHA detected while in DASHBOARD_MODE.")
+        print("[!] Setting state to pending and waiting for dashboard resolution...")
+        # Note: We do NOT raise CrawlAbortedByUser here anymore. We will pause below.
+    
+    # First, check if this is a session-expired page (not just a CAPTCHA)
+    _, is_session_dead = _check_session_status(_page)
+    
+    print(f"\n{'!'*60}")
+    if is_session_dead:
+        print(f"[!] SESSION EXPIRED / BOT DETECTION TRIGGERED")
+    else:
+        print(f"[!] CHALLENGE / CAPTCHA / LOGIN WALL DETECTED")
+    print(f"URL: {url}")
+    print(f"{'!'*60}")
+    
+    # Save state from headless and close it
+    if _context:
+        try:
+            _context.storage_state(path=STATE_FILE)
+        except Exception:
+            pass
+        _browser.close()
+        
+    ua = _get_random_ua()
+    
+    # Launch visible browser for manual bypass
+    vis_browser, vis_context, vis_page = _launch_visible_browser(url, ua)
+    
+    print("\n>>> Please solve the CAPTCHA, Login, or refresh the session in the opened browser window.")
+    print(">>> Wait until you see the actual forum content.")
+    
+    user_choice = _get_user_captcha_choice()
+    
+    if user_choice in ['exit', 'quit', 'q']:
+        print("\n[*] User chose to abort the crawl. Cleaning up visible browser...")
+        vis_browser.close()
+        raise CrawlAbortedByUser("Crawl aborted by user during challenge.")
+    
+    if user_choice in ['new', 'identity', 'renew', 'n']:
+        print("\n[*] User chose new identity. Closing visible browser...")
+        vis_browser.close()
+        _playwright_context.stop()
+        _playwright_context = None
+        _browser = None
+        _context = None
+        _page = None
+        raise SessionExpired("User requested new identity after bot detection.")
+    
+    # User pressed ENTER — manual bypass completed, resume
+    # Save the newly authenticated state (with the CAPTCHA clearance cookies)
+    vis_context.storage_state(path=STATE_FILE)
+    html = vis_page.content()
+    
+    # Close visible browser
+    vis_browser.close()
+    
+    print("[*] State saved. Resuming headless scraping...\n")
+    
+    # Re-launch headless browser with the new state
+    _resume_headless_browser()
+    
+    return html
+
+
+def _ensure_url_scheme(url):
+    """Ensure URL is trimmed and has a proper protocol."""
+    url = url.strip()
+    if not url:
+        return ""
+    if "://" not in url:
+        url = "http://" + url
+    return url
+
+
+def fetch_page(url, retries=3):
+    """
+    Fetch a page using the Playwright browser.
+    Automatically handles CAPTCHA interruptions.
+    
+    Enhanced with:
+      - Human-like behavior simulation after page load
+      - Tor circuit renewal on repeated failures
+      - Adaptive retry delays based on consecutive failures
+    """
+    global _page, _consecutive_failures
+    if _page is None:
+        init_browser()
+        
+    url = _ensure_url_scheme(url)
+    if not url:
+        return None
+        
+    for attempt in range(retries):
+        try:
+            print(f"[*] Navigating to {url} (Attempt {attempt+1})...")
+            # Wait until DOM content is loaded. 'networkidle' is too flaky on Tor.
+            response = _page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            
+            # Wait a tiny bit extra for DOM to settle
+            _page.wait_for_timeout(random.randint(1500, 3000))
+            
+            # Simulate human browsing behavior
+            _simulate_human(_page)
+            
+            html = _page.content()
+            
+            if _is_challenge_page(html):
+                _consecutive_failures += 1
+                return solve_captcha_interactive(url)
+            
+            # If we get an error code, fallback to retry
+            if response and response.status in [403, 429, 500, 502, 503]:
+                _consecutive_failures += 1
+                print(f"[-] Status {response.status} on attempt {attempt+1}")
+                
+                # On 403, try renewing Tor circuit
+                if response.status == 403 and attempt < retries - 1:
+                    print("[!] 403 Forbidden — trying new Tor circuit...")
+                    _try_renew_tor_circuit()
+            else:
+                _consecutive_failures = 0  # Reset on success
+                return html
+                
+        except CrawlAbortedByUser:
+            # Propagate the abort signal up to the main crawler loop immediately
+            raise
+        except SessionExpired:
+            # Propagate so the crawler can restart with a new identity
+            raise
+        except Exception as e:
+            _consecutive_failures += 1
+            err_str = str(e).lower()
+            if "net::err_proxy_connection_failed" in err_str:
+                print(f"[-] Tor Proxy Connection Failed! Ensure Tor is running on port 9150.")
+                return None
+            if "net::err_socks_connection_failed" in err_str:
+                print(f"[-] SOCKS connection failed. Check Tor connectivity.")
+                return None
+            if "invalid url" in err_str:
+                print(f"[-] Critical: The URL provided is invalid: '{url}'")
+                return None
+            print(f"[-] Playwright attempt {attempt+1} failed: {e}")
+            
+        # Adaptive retry delay: increases with consecutive failures
+        failure_multiplier = min(1 + (_consecutive_failures * 0.3), 4.0)
+        base_delay = min(3 * (2 ** attempt), 30)
+        delay = (base_delay + random.uniform(0, base_delay * 0.5)) * failure_multiplier
+        print(f"  -> Retrying in {delay:.1f}s (failure multiplier: {failure_multiplier:.1f}x)")
+        time.sleep(delay)
+        
+    return None
