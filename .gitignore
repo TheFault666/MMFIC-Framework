@@ -4,12 +4,6 @@ __pycache__/
 *$py.class
 .DS_Store
 .env
-test_discourse.py
-test_fetcher.py
-test_fingerprint_store.py
-test_model.py
-test_parsers.py
-*.zip
 *.db
 *.db-journal
 crawl_data.json
@@ -17,7 +11,6 @@ structural_cache.json
 schema_cache.json
 browser_state.json
 *.joblib
-recentfetch.json
 *.pdf
 
 # Additional Ignore Rules
