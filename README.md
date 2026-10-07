@@ -33,7 +33,7 @@ The framework is divided into two primary subsystems:
 
 ### 2. Setup
 ```bash
-git clone https://github.com/yourusername/MMFIC-Framework.git
+git clone https://github.com/TheFault666/MMFIC-Framework.git
 cd MMFIC-Framework
 
 # Create virtual environment
