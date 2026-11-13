@@ -4,19 +4,3 @@ __pycache__/
 *$py.class
 .DS_Store
 .env
-*.db
-*.db-journal
-crawl_data.json
-structural_cache.json
-schema_cache.json
-browser_state.json
-*.joblib
-*.pdf
-
-# Additional Ignore Rules
-.vscode/
-.idea/
-.agents/
-dummy_crawl_data.json
-Model/model_meta.json
-user_data_*.json
