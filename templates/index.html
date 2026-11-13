@@ -567,6 +567,7 @@
 <body>
 
     <header style="display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 20px 0;">
+        <button class="btn btn-muted" onclick="lockDashboard()" style="position: absolute; top: 18px; right: 20px; padding: 6px 12px; font-size: 0.8rem;" title="Clear session token and lock dashboard">LOCK SESSION</button>
         <img src="/static/logo.png" alt="MMFIC Logo" style="height: 80px; margin-bottom: 15px; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3));">
         <div class="header-title" style="text-shadow: none; font-size: 2rem;">TROWLER <span class="separator" style="color: var(--neon-cyan); text-shadow: none;">//</span> MMFIC</div>
         <div class="header-subtitle">Multi-Modal Forum Identity Correlation</div>
@@ -581,9 +582,6 @@
     </div>
 
     <main>
-        <!-- ==========================================
-             VIEW: WELCOME
-             ========================================== -->
         <section id="view-welcome" class="view active">
             <div class="grid-3" style="margin-top: 40px;">
                 <div class="cyber-card" onclick="showView('view-general-crawl')">
@@ -612,9 +610,6 @@
             </div>
         </section>
 
-        <!-- ==========================================
-             VIEW: GENERAL CRAWL
-             ========================================== -->
         <section id="view-general-crawl" class="view">
             <button class="btn-back" onclick="showView('view-welcome')">&#9664; BACK TO MENU</button>
             <div class="glass-panel" style="max-width: 800px; margin: 0 auto;">
@@ -657,9 +652,6 @@
             </div>
         </section>
 
-        <!-- ==========================================
-             VIEW: USER CRAWL
-             ========================================== -->
         <section id="view-user-crawl" class="view">
             <button class="btn-back" onclick="showView('view-welcome')">&#9664; BACK TO MENU</button>
             <div class="glass-panel" style="max-width: 800px; margin: 0 auto;">
@@ -702,9 +694,6 @@
             </div>
         </section>
 
-        <!-- ==========================================
-             VIEW: IDENTITY HUB
-             ========================================== -->
         <section id="view-identity-hub" class="view">
             <button class="btn-back" onclick="showView('view-welcome')">&#9664; BACK TO MENU</button>
             <h2 style="text-align: center; margin-bottom: 30px; color: var(--neon-cyan);">IDENTITY ENGINE</h2>
@@ -740,9 +729,6 @@
             </div>
         </section>
 
-        <!-- ==========================================
-             VIEW: BROWSE USERS
-             ========================================== -->
         <section id="view-browse-users" class="view">
             <button class="btn-back" onclick="showView('view-identity-hub')">&#9664; BACK TO ENGINE</button>
             <div class="glass-panel">
@@ -750,14 +736,10 @@
                 <input type="text" id="search-users" placeholder="Filter by username or platform..." onkeyup="filterUsers()" style="margin-bottom: 25px;">
                 
                 <div id="platforms-container">
-                    <!-- Platform cards injected here -->
                 </div>
             </div>
         </section>
 
-        <!-- ==========================================
-             VIEW: PAIRWISE COMPARE
-             ========================================== -->
         <section id="view-pair-compare" class="view">
             <button class="btn-back" onclick="showView('view-identity-hub')">&#9664; BACK TO ENGINE</button>
             <div class="glass-panel" style="max-width: 900px; margin: 0 auto;">
@@ -780,16 +762,16 @@
                 
                 <div class="grid-3" style="margin-top: 20px;">
                     <div class="form-group">
-                        <label>MATCH THRESHOLD (DEFAULT: 0.8)</label>
-                        <input type="number" id="match-threshold" value="0.8" step="0.05" min="0" max="1">
+                        <label>CANONICAL MATCH THRESHOLD (SERVER-LOCKED)</label>
+                        <input type="number" id="match-threshold" value="0.80" readonly style="opacity: 0.7; cursor: not-allowed;" title="Server-governed canonical threshold (0.80)">
                     </div>
                     <div class="form-group">
-                        <label>MISMATCH THRESHOLD (DEFAULT: 0.3)</label>
-                        <input type="number" id="mismatch-threshold" value="0.3" step="0.05" min="0" max="1">
+                        <label>CANONICAL MISMATCH THRESHOLD (SERVER-LOCKED)</label>
+                        <input type="number" id="mismatch-threshold" value="0.30" readonly style="opacity: 0.7; cursor: not-allowed;" title="Server-governed canonical threshold (0.30)">
                     </div>
                     <div class="form-group">
-                        <label>COSINE TIE-BREAKER (DEFAULT: 0.85)</label>
-                        <input type="number" id="cosine-tie-breaker" value="0.85" step="0.05" min="0" max="1">
+                        <label>COSINE TIE-BREAKER (SERVER-LOCKED)</label>
+                        <input type="number" id="cosine-tie-breaker" value="0.85" readonly style="opacity: 0.7; cursor: not-allowed;" title="Server-governed tie-breaker threshold (0.85)">
                     </div>
                 </div>
                 
@@ -812,9 +794,6 @@
             </div>
         </section>
 
-        <!-- ==========================================
-             VIEW: IDENTITY GRAPH
-             ========================================== -->
         <section id="view-identity-graph" class="view">
             <button class="btn-back" onclick="showView('view-identity-hub')">&#9664; BACK TO ENGINE</button>
             <div class="glass-panel">
@@ -834,16 +813,12 @@
             </div>
         </section>
 
-        <!-- ==========================================
-             VIEW: CRAWL & COMPARE
-             ========================================== -->
         <section id="view-crawl-compare" class="view">
             <button class="btn-back" onclick="showView('view-identity-hub')">&#9664; BACK TO ENGINE</button>
             <div class="glass-panel" style="max-width: 800px; margin: 0 auto;">
                 <h2 style="margin-bottom: 25px; color: var(--neon-cyan);">CRAWL & COMPARE</h2>
                 <p style="color: var(--text-muted); margin-bottom: 20px;">Combines targeted crawling with immediate identity matching against the database.</p>
                 
-                <!-- Same form as user crawl but with compare logic after -->
                 <div class="form-group">
                     <label>Forum URL</label>
                     <input type="text" id="cc-url" placeholder="https://forum.example.onion">
@@ -878,14 +853,10 @@
         </section>
     </main>
 
-    <!-- ==========================================
-         MODAL: TRAINING PROMPT
-         ========================================== -->
     <div id="train-modal" class="modal-overlay">
         <div class="modal-content">
             <div class="modal-header">TRAIN IDENTITY MODEL?</div>
             
-            <!-- State 1: Prompt -->
             <div id="train-state-prompt">
                 <div class="modal-body">
                     <p>New data has been collected. Training the model on your latest data improves identity match accuracy.</p>
@@ -900,13 +871,11 @@
                 </div>
             </div>
 
-            <!-- State 2: Progress -->
             <div id="train-state-progress" style="display:none; text-align: center;">
                 <div class="spinner" style="display: block;"></div>
                 <p style="margin-top: 20px; font-family: 'Orbitron', sans-serif; color: var(--neon-cyan);" id="train-status-text">Initializing Model...</p>
             </div>
 
-            <!-- State 3: Complete -->
             <div id="train-state-complete" style="display:none; text-align: center;">
                 <div style="font-size: 3rem; color: var(--success); margin-bottom: 15px;">&#10003;</div>
                 <h3 style="color: #fff; margin-bottom: 20px;">TRAINING COMPLETE</h3>
@@ -920,9 +889,6 @@
         </div>
     </div>
 
-    <!-- ==========================================
-         MODAL: CAPTCHA ACTION REQUIRED
-         ========================================== -->
     <div id="captcha-modal" class="modal-overlay">
         <div class="modal-content" style="border: 2px solid var(--warning); box-shadow: 0 0 20px rgba(255,170,0,0.5);">
             <div class="modal-header" style="color: var(--warning);">ACTION REQUIRED</div>
@@ -939,37 +905,105 @@
         </div>
     </div>
 
-    <!-- ==========================================
-         SCRIPTS
-         ========================================== -->
+    <div id="auth-modal" class="modal-overlay">
+        <div class="modal-content" style="border: 1px solid var(--neon-cyan);">
+            <div class="modal-header" style="color: var(--neon-cyan);">AUTHENTICATION REQUIRED</div>
+            <div class="modal-body">
+                <p style="font-size: 1rem; color: var(--text-muted); margin-bottom: 15px;">
+                    Enter your <strong style="color: var(--text-primary);">X-API-Token</strong> from <code>.env</code> (<code>DASHBOARD_API_TOKEN</code>) or the server startup terminal.
+                </p>
+                <div class="form-group">
+                    <label>X-API-TOKEN</label>
+                    <input type="password" id="auth-token-input" placeholder="Paste API token here..." onkeydown="if(event.key==='Enter') submitAuthToken()">
+                </div>
+                <div id="auth-error-msg" style="color: var(--danger); font-size: 0.9rem; margin-bottom: 12px; display: none;"></div>
+                <div class="btn-row" style="justify-content: flex-end;">
+                    <button class="btn btn-primary" onclick="submitAuthToken()">UNLOCK DASHBOARD</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script>
-        // --- State ---
         let crawlInterval = null;
         let trainInterval = null;
         let currentCrawlPrefix = null; // 'gen', 'usr', 'cc'
         
         let allUsersCache = {};
         
-        // --- Core ---
-        async function apiCall(endpoint, method = 'GET', body = null) {
+        function getApiToken() {
+            return sessionStorage.getItem('mmfic_api_token') || '';
+        }
+
+        function showAuthModal(msg = '') {
+            const errEl = document.getElementById('auth-error-msg');
+            if (msg) {
+                errEl.textContent = msg;
+                errEl.style.display = 'block';
+            } else {
+                errEl.style.display = 'none';
+            }
+            document.getElementById('auth-modal').classList.add('active');
+            setTimeout(() => document.getElementById('auth-token-input').focus(), 50);
+        }
+
+        async function submitAuthToken() {
+            const val = (document.getElementById('auth-token-input').value || '').trim();
+            if (!val) {
+                showAuthModal('Please enter a valid X-API-Token.');
+                return;
+            }
+            sessionStorage.setItem('mmfic_api_token', val);
             try {
-                const options = { method, headers: {} };
+                await apiCall('/api/stats', 'GET', null, true);
+                document.getElementById('auth-token-input').value = '';
+                document.getElementById('auth-modal').classList.remove('active');
+                loadGlobalStats();
+                checkModelStatus();
+            } catch (err) {
+                sessionStorage.removeItem('mmfic_api_token');
+                showAuthModal(err.message || 'Authentication failed.');
+            }
+        }
+
+        function lockDashboard() {
+            sessionStorage.removeItem('mmfic_api_token');
+            showAuthModal('Session locked. Re-enter X-API-Token to continue.');
+        }
+
+        async function apiCall(endpoint, method = 'GET', body = null, suppressAlert = false) {
+            const token = getApiToken();
+            if (!token) {
+                showAuthModal();
+                throw new Error('Authentication required');
+            }
+            try {
+                const options = {
+                    method,
+                    headers: { 'X-API-Token': token }
+                };
                 if (body) {
                     options.headers['Content-Type'] = 'application/json';
                     options.body = JSON.stringify(body);
                 }
                 const res = await fetch(endpoint, options);
                 const data = await res.json();
+                if (res.status === 401) {
+                    sessionStorage.removeItem('mmfic_api_token');
+                    showAuthModal(data.error || 'Invalid or expired X-API-Token.');
+                    throw new Error(data.error || 'Unauthorized');
+                }
                 if (!res.ok) throw new Error(data.error || 'API Error');
                 return data;
             } catch (err) {
                 console.error(err);
-                alert("Error: " + err.message);
+                if (!suppressAlert && err.message !== 'Authentication required' && !err.message.includes('Unauthorized')) {
+                    alert("Error: " + err.message);
+                }
                 throw err;
             }
         }
 
-        // --- Navigation ---
         function showView(viewId) {
             document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
             document.getElementById(viewId).classList.add('active');
@@ -979,10 +1013,13 @@
             if (viewId === 'view-identity-graph') ensureVisJs();
         }
 
-        // --- Initialization ---
         document.addEventListener('DOMContentLoaded', () => {
-            loadGlobalStats();
-            checkModelStatus();
+            if (!getApiToken()) {
+                showAuthModal();
+            } else {
+                loadGlobalStats();
+                checkModelStatus();
+            }
         });
 
         async function loadGlobalStats() {
@@ -1007,19 +1044,16 @@
             document.getElementById('stale-banner').classList.add('hidden');
         }
 
-        // --- Crawl Logic ---
         async function startCrawl(prefix, endpoint, body) {
-            // UI Reset
             currentCrawlPrefix = prefix;
             document.getElementById(`btn-${prefix}-start`).disabled = true;
             document.getElementById(`btn-${prefix}-stop`).disabled = false;
             document.getElementById(`${prefix}-progress-area`).style.display = 'block';
-            document.getElementById(`${prefix}-progress-bar`).style.width = '100%'; // indeterminate shimmer
+            document.getElementById(`${prefix}-progress-bar`).style.width = '100%';
             document.getElementById(`${prefix}-status-text`).innerText = 'Starting...';
             
             try {
                 await apiCall(endpoint, 'POST', body);
-                // Start polling
                 crawlInterval = setInterval(pollCrawl, 2000);
             } catch(e) {
                 resetForm(prefix);
@@ -1117,12 +1151,11 @@
                     if (state.error) {
                         alert("Crawl failed: " + state.error);
                     } else {
-                        // Success!
                         loadGlobalStats();
                         if (currentCrawlPrefix === 'cc') {
                             document.getElementById('cc-compare-area').style.display = 'block';
                         }
-                        showTrainModal(); // Prompt for training
+                        showTrainModal();
                     }
                 }
             } catch(e) {
@@ -1145,7 +1178,6 @@
             }
         }
 
-        // --- Training Modal ---
         function showTrainModal() {
             document.getElementById('train-state-prompt').style.display = 'block';
             document.getElementById('train-state-progress').style.display = 'none';
@@ -1155,7 +1187,7 @@
 
         function closeTrainModal() {
             document.getElementById('train-modal').classList.remove('active');
-            checkModelStatus(); // Updates banner if needed
+            checkModelStatus();
         }
 
         function skipTraining() {
@@ -1209,7 +1241,6 @@
             }
         }
 
-        // --- Browse Users ---
         async function loadBrowseUsers() {
             try {
                 const data = await apiCall('/api/users');
@@ -1227,7 +1258,6 @@
             for (const forum of Object.keys(data).sort()) {
                 let users = data[forum];
                 
-                // Filter
                 if (q) {
                     if (!forum.toLowerCase().includes(q)) {
                         users = users.filter(u => u.username.toLowerCase().includes(q));
@@ -1267,7 +1297,6 @@
             }, 300);
         }
 
-        // --- Pairwise Compare ---
         async function loadPairDropdowns() {
             try {
                 const data = await apiCall('/api/users');
@@ -1302,42 +1331,31 @@
                 document.getElementById('gauge-score').textContent = "...";
                 document.getElementById('gauge-fill').setAttribute('stroke-dasharray', `0 251`);
                 
-                const matchThresh = parseFloat(document.getElementById('match-threshold').value) || 0.8;
-                const mismatchThresh = parseFloat(document.getElementById('mismatch-threshold').value) || 0.3;
-                const tieBreaker = parseFloat(document.getElementById('cosine-tie-breaker').value) || 0.85;
-                
                 const res = await apiCall('/api/compare/pair', 'POST', {
-                    user_a: uA, forum_a: fA, user_b: uB, forum_b: fB,
-                    match_threshold: matchThresh,
-                    mismatch_threshold: mismatchThresh,
-                    cosine_tie_breaker: tieBreaker
+                    user_a: uA, forum_a: fA, user_b: uB, forum_b: fB
                 });
                 
                 const score = res.score;
                 const dashLen = score * 251;
                 
-                // Animate gauge
                 setTimeout(() => {
                     document.getElementById('gauge-fill').setAttribute('stroke-dasharray', `${dashLen} 251`);
                     document.getElementById('gauge-score').textContent = score.toFixed(2);
                 }, 100);
                 
-                // Verdict badge
+                // Verdict badge: keyed directly off canonical server verdict
                 const badge = document.getElementById('verdict-badge');
                 badge.innerText = res.verdict || "UNKNOWN";
                 badge.className = "verdict-badge";
-                if(score > 0.7) badge.classList.add('verdict-same');
-                else if (score >= 0.4) badge.classList.add('verdict-unc');
-                else badge.classList.add('verdict-diff');
+                if(res.verdict === 'MATCH') badge.classList.add('verdict-same');
+                else if (res.verdict === 'MISMATCH') badge.classList.add('verdict-diff');
+                else badge.classList.add('verdict-unc');
                 
             } catch(e) {}
         }
         
         async function runCcCompareAll() {
             const targetUsername = document.getElementById('cc-username').value;
-            // Derive forum from URL naively or assume we have it. 
-            // The crawler saves it to DB. Let's just ask the user to type the exact username and forum.
-            // For a robust implementation, the crawler response should return the detected forum.
             const url = document.getElementById('cc-url').value;
             let forum = url;
             try { forum = new URL(url).hostname; } catch(e){}
@@ -1369,7 +1387,6 @@
             } catch(e) {}
         }
 
-        // --- Identity Graph ---
         let visJsLoaded = false;
         function ensureVisJs() {
             if (visJsLoaded) return;
@@ -1392,7 +1409,6 @@
             try {
                 const data = await apiCall(`/api/compare/graph?threshold=${thresh}`);
                 
-                // Prepare vis.js data and add size scaling based on post_count
                 const nodesData = (data.nodes || []).map(n => {
                     n.value = n.post_count || 1;
                     return n;
@@ -1439,7 +1455,6 @@
                     network.setOptions({ physics: { enabled: false } });
                 });
                 
-                // Also disable on drag just in case
                 network.on("dragStart", function(params) {
                     if (params.nodes.length > 0) {
                         network.setOptions({ physics: { enabled: false } });

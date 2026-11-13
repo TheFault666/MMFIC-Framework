@@ -1,7 +1,6 @@
 from bs4 import BeautifulSoup, Tag
 import re
 
-# ── Noise patterns to exclude from content extraction ────────────
 _NOISE_PATTERNS = re.compile(
     r"(cookie|privacy|terms of service|copyright|all rights reserved|"
     r"powered by|wordpress|admin@|sign up|sign in|log in|register|"
@@ -13,7 +12,6 @@ _NOISE_PATTERNS = re.compile(
 _NAV_TAGS = {"nav", "header", "footer", "aside", "noscript"}
 
 
-# ── Index page parser (finds thread links, NO content extraction) ─
 def try_find_index_posts(soup):
     selectors = [
         ("div", "post"),
@@ -60,7 +58,6 @@ def parse_forum(html, url):
     return data
 
 
-# ── Thread page parser (extracts full post bodies) ───────────────
 def _extract_posts_from_containers(containers, url):
     data = []
     for container in containers:
@@ -351,7 +348,7 @@ def _is_inside_noise(elem):
 
 def _try_timestamp_selectors(tag):
     time_selectors = [
-        ("time",  None),         # HTML5 time element
+        ("time",  None),
         ("span",  re.compile(r"time|date|timestamp|posted|when|ago", re.I)),
         ("div",   re.compile(r"time|date|timestamp", re.I)),
         ("abbr",  re.compile(r"time|date", re.I)),

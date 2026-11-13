@@ -1,8 +1,9 @@
-from bs4 import BeautifulSoup
 import re
-import hashlib
 
-# Noise patterns — skip text that matches these
+from bs4 import BeautifulSoup
+
+from app.crawler.crawl_utils import hash_text_snippet
+
 _NOISE_PATTERNS = re.compile(
     r"(cookie|privacy|terms of service|copyright|all rights reserved|"
     r"powered by|wordpress|admin@|sign up|sign in|log in|register|"
@@ -30,7 +31,7 @@ def is_quality_text(text):
     return True
 
 def calculate_content_hash(text):
-    return hashlib.md5(text[:200].encode()).hexdigest()
+    return hash_text_snippet(text, length=200)
 
 def parse_generic(html, url):
     """Generic fallback parser with quality gates.

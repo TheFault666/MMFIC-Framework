@@ -4,9 +4,11 @@ from app.parser.blog_parser import parse_blog
 from app.parser.generic_parser import parse_generic
 from app.parser.proximity_parser import extract_by_proximity
 from app.parser.schema_parser import parse_with_schema
-from app.parser.llm_parser import parse_with_llm, LLMQuotaExceeded
+from app.parser.llm_parser import parse_with_llm, LLMOpsecBlocked
 from app.parser.post_processor import post_process
+from app.diagnostics import log_failure
 import json
+import logging
 
 
 def is_json_response(html: str) -> bool:
@@ -19,8 +21,8 @@ def try_parse_json(html: str, url: str):
         try:
             json_data = json.loads(html)
             return _parse_raw_json(json_data, url)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_failure("Failed to parse JSON API response", exc, level=logging.DEBUG, url=url)
     return None
 
 
@@ -72,8 +74,12 @@ def try_proximity_parser(html, url):
 
 
 def try_llm_parser(html, url):
-    llm_data = parse_with_llm(html, url)
-    return llm_data or [], count_real_posts(llm_data or [])
+    try:
+        llm_data = parse_with_llm(html, url)
+        return llm_data or [], count_real_posts(llm_data or [])
+    except LLMOpsecBlocked as e:
+        print(f"  [-] LLM parsing bypassed by OPSEC guardrail: {e}")
+        return [], 0
 
 
 def should_use_llm(data, real_posts_count):

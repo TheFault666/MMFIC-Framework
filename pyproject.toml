@@ -1,0 +1,7 @@
+[tool.ruff]
+target-version = "py312"
+exclude = ["venv", ".git", "__pycache__"]
+
+[tool.ruff.lint]
+select = ["F", "E7", "E9"]
+ignore = ["E701", "F541"]

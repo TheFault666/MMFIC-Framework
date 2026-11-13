@@ -15,42 +15,52 @@ Features:
     seamlessly resuming the scrape with the authenticated session.
 """
 
-import re
-import time
-import random
+import logging
 import os
+import queue
+import random
+import re
 import threading
+import time
+from urllib.parse import urlparse
+
 import requests
 from playwright.sync_api import sync_playwright
+
+from app.diagnostics import log_failure, notify_captcha_pending
 try:
-    from playwright_stealth import stealth_sync
+    from playwright_stealth import Stealth
+    _stealth_adapter = Stealth()
+
+    def stealth_sync(page):
+        """Apply playwright-stealth 2.x evasions to a synchronous page."""
+        _stealth_adapter.apply_stealth_sync(page)
 except ImportError:
-    from playwright_stealth import stealth as stealth_sync
+    try:
+        from playwright_stealth import stealth_sync
+    except ImportError:
+        from playwright_stealth import stealth as stealth_sync
 
 
-# ── Tor Configuration (merged from fetcher.py) ──────────────────
-
-USE_TOR = True    # change to True when Tor is configured
+USE_TOR = True
 
 TOR_PROXY = "socks5://127.0.0.1:9150"
 
-# socks5h variant for requests library (DNS resolution through Tor)
+# socks5h resolves DNS through Tor instead of locally
 _TOR_PROXY_REQUESTS = "socks5h://127.0.0.1:9150"
 _requests_proxies = {
     "http": _TOR_PROXY_REQUESTS,
     "https": _TOR_PROXY_REQUESTS
 } if USE_TOR else None
 
-# Challenge page indicators (static keyword fallback — lowest priority signal)
 CHALLENGE_INDICATORS = [
     "captcha", "ddos-guard", "cloudflare", "challenge",
     "enable javascript", "please wait", "checking your browser",
-    "endgame", "just a moment",  # common onion anti-DDoS services
-    "placed in a queue", "estimated wait time",  # queue pages
-    "session expired", "bot-like behavio", "new session",  # bot detection
+    "endgame", "just a moment",
+    "placed in a queue", "estimated wait time",
+    "session expired", "bot-like behavio", "new session",
 ]
 
-# URL path fragments that indicate a login/auth redirect
 _LOGIN_URL_PATTERNS = [
     "/login", "/signin", "/sign-in", "/sign_in",
     "/log-in", "/log_in", "/auth", "/oauth",
@@ -81,42 +91,30 @@ def _score_challenge_signals(html, current_url=None, original_url=None):
     reasons = []
     score = 0
     
-    # ── Signal 1: DOM Structure — Password fields ────────────────
-    # This is the most universal indicator. Every login page on Earth
-    # (clearnet or .onion) uses <input type="password">.
     has_password_field = ('type="password"' in lower_html or 
                          "type='password'" in lower_html or
                          'type=password' in lower_html)
     
-    # ── Signal 2: Content density — How much readable text? ──────
-    # Strip all tags to estimate visible text word count.
-    # Remove script/style blocks first
     stripped = re.sub(r'<(script|style|noscript)[^>]*>.*?</\1>', '', lower_html, flags=re.DOTALL)
-    # Remove all remaining tags
     stripped = re.sub(r'<[^>]+>', ' ', stripped)
-    # Collapse whitespace
     stripped = re.sub(r'\s+', ' ', stripped).strip()
     word_count = len(stripped.split())
     
     low_content = word_count < 200
     very_low_content = word_count < 80
     
-    # ── Signal 3: URL redirect detection ─────────────────────────
     url_redirected_to_login = False
     if current_url and original_url:
-        # Normalize for comparison (strip trailing slashes, fragments)
         curr_path = current_url.split('?')[0].split('#')[0].rstrip('/')
         orig_path = original_url.split('?')[0].split('#')[0].rstrip('/')
         
         if curr_path != orig_path:
-            # URL changed — check if it landed on a login-like path
             curr_lower = current_url.lower()
             for pattern in _LOGIN_URL_PATTERNS:
                 if pattern in curr_lower:
                     url_redirected_to_login = True
                     break
     
-    # ── Signal 4: Static keyword match (existing fallback) ───────
     keyword_matched = False
     first_2k = lower_html[:2000]
     for indicator in CHALLENGE_INDICATORS:
@@ -124,7 +122,6 @@ def _score_challenge_signals(html, current_url=None, original_url=None):
             keyword_matched = True
             break
     
-    # ── Signal 5: OAuth/SSO provider buttons (clearnet only) ─────
     is_onion = original_url and '.onion' in original_url
     has_oauth = False
     if not is_onion:
@@ -135,9 +132,6 @@ def _score_challenge_signals(html, current_url=None, original_url=None):
         ]
         has_oauth = any(marker in lower_html for marker in oauth_markers)
     
-    # ── Scoring ──────────────────────────────────────────────────
-    
-    # Password field + very little content = almost certainly a login wall
     if has_password_field and very_low_content:
         score += 40
         reasons.append("password_field+very_low_content")
@@ -145,8 +139,6 @@ def _score_challenge_signals(html, current_url=None, original_url=None):
         score += 35
         reasons.append("password_field+low_content")
     elif has_password_field:
-        # Password field exists but page has substantial content too
-        # (e.g., sidebar login on a forum that shows public threads)
         score += 25
         reasons.append("password_field_present")
     
@@ -155,12 +147,10 @@ def _score_challenge_signals(html, current_url=None, original_url=None):
         reasons.append("url_redirected_to_login")
     
     if low_content and not has_password_field:
-        # Low content without a password field — could be a DDoS wait page
         score += 15
         reasons.append("low_content_density")
     
     if keyword_matched:
-        # Boosted score to ensure DDOS-Guard/Cloudflare trigger HITL if auto-solve fails
         score += 30
         reasons.append("keyword_match_boosted")
     
@@ -200,21 +190,83 @@ _browser = None
 _context = None
 _page = None
 
-DASHBOARD_MODE = False
-dashboard_captcha_event = threading.Event()
-dashboard_captcha_action = None
+CAPTCHA_TIMEOUT_SECONDS = int(os.getenv("CAPTCHA_TIMEOUT_SECONDS", 3600))
+VALID_CAPTCHA_ACTIONS = {"resume", "new", "exit"}
 
-# Track consecutive failures for adaptive behavior
+DASHBOARD_MODE = False
+dashboard_captcha_queue = queue.Queue(maxsize=1)
+
+
+def _drain_captcha_queue():
+    """Clear any stale or unconsumed HITL CAPTCHA actions."""
+    while True:
+        try:
+            dashboard_captcha_queue.get_nowait()
+        except queue.Empty:
+            break
+
+
+def submit_captcha_action(action, force=False):
+    """Queue a validated HITL CAPTCHA action from the dashboard.
+
+    Args:
+        action: One of 'resume', 'new', 'exit'.
+        force: If True (e.g., crawl stop), replace any pending item.
+
+    Returns:
+        bool: True if queued cleanly, False if queue already holds an action.
+    """
+    normalized = (action or "").strip().lower()
+    if normalized not in VALID_CAPTCHA_ACTIONS:
+        raise ValueError(f"Invalid CAPTCHA action '{action}'. Must be one of {sorted(VALID_CAPTCHA_ACTIONS)}.")
+    if force:
+        _drain_captcha_queue()
+    try:
+        dashboard_captcha_queue.put_nowait(normalized)
+        return True
+    except queue.Full:
+        return False
+
+_state_lock = threading.Lock()
+stop_requested = threading.Event()
 _consecutive_failures = 0
 
 
-# ── Tor Utilities (merged from fetcher.py) ───────────────────────
+def request_stop():
+    """Signal all crawler loops and sleeps to abort cooperatively."""
+    stop_requested.set()
+    try:
+        submit_captcha_action("exit", force=True)
+    except Exception:
+        pass
 
-def check_tor():
-    """Verify Tor connection is working."""
+
+def clear_stop_request():
+    """Clear stop flag before starting a fresh crawl."""
+    stop_requested.clear()
+
+
+def is_stop_requested():
+    """Return True if an active crawl stop has been signaled."""
+    return stop_requested.is_set()
+
+
+_last_tor_check_time = 0
+_last_tor_check_result = False
+_last_tor_ip = None
+
+
+def check_tor(force=False):
+    """Verify Tor connection is working with a 15-second cache to prevent API flooding."""
+    global _last_tor_check_time, _last_tor_check_result, _last_tor_ip
     if not USE_TOR:
         print("[!] Tor disabled — running in clearnet mode")
         return False
+
+    now = time.time()
+    with _state_lock:
+        if not force and (now - _last_tor_check_time < 15):
+            return _last_tor_check_result
 
     try:
         r = requests.get(
@@ -223,22 +275,92 @@ def check_tor():
             timeout=15
         )
         data = r.json()
-        if data.get("IsTor"):
-            print(f"[+] Tor OK | Exit IP: {data.get('IP')}")
+        is_tor = bool(data.get("IsTor"))
+        ip = data.get("IP")
+        with _state_lock:
+            _last_tor_ip = ip
+            _last_tor_check_time = now
+            _last_tor_check_result = is_tor
+        if is_tor:
+            print(f"[+] Tor OK | Exit IP: {ip}")
             return True
-        else:
-            print(f"[!] Connected but NOT through Tor | IP: {data.get('IP')}")
-            return False
+        print(f"[!] Connected but NOT through Tor | IP: {ip}")
+        return False
     except Exception as e:
         print(f"[-] Tor connection failed: {e}")
+        with _state_lock:
+            _last_tor_check_time = now
+            _last_tor_check_result = False
         return False
+
+
+def get_tor_details(force=False):
+    """Return dictionary with Tor connection status and current IP."""
+    if not USE_TOR:
+        return {"tor_active": False, "is_tor": False, "ip": None, "mode": "clearnet"}
+    is_ok = check_tor(force=force)
+    with _state_lock:
+        ip = _last_tor_ip
+    return {
+        "tor_active": is_ok,
+        "is_tor": is_ok,
+        "ip": ip,
+        "mode": "tor"
+    }
+
+
+def is_onion_url(url):
+    """Check if a URL targets a .onion hidden service."""
+    if not url:
+        return False
+    try:
+        host = urlparse(url if "://" in url else f"http://{url}").netloc.lower()
+        host = host.split(":")[0]
+        return host.endswith(".onion")
+    except Exception:
+        return False
+
+
+def ensure_tor_safety(target_url=None):
+    """
+    Centralized Target-Aware OPSEC Gate.
+    
+    1. If target_url is .onion: Tor is MANDATORY. Refuses to proceed if Tor
+       is offline or disabled to avoid local DNS/IP leaks.
+    2. If USE_TOR is enabled: Tor must be operational before any crawl starts.
+    3. If target_url is clearnet and USE_TOR is disabled: logs an explicit warning.
+    """
+    if is_onion_url(target_url):
+        if not USE_TOR:
+            raise TorOPSECError(
+                "CRITICAL OPSEC VIOLATION: Target is a .onion address but USE_TOR is False. "
+                "Crawl blocked to prevent local DNS leak."
+            )
+        if not check_tor():
+            raise TorOPSECError(
+                "CRITICAL OPSEC VIOLATION: Target is a .onion address but Tor is offline or unreachable. "
+                "Crawl blocked to prevent identity leak."
+            )
+        return True
+
+    if USE_TOR:
+        if not check_tor():
+            raise TorOPSECError(
+                "Tor is enabled in configuration but unreachable. "
+                "Crawl blocked to prevent accidental cleartext fallback."
+            )
+        return True
+
+    print("[!] OPSEC WARNING: Tor is disabled. Crawling this clearnet host will expose your real IP address.")
+    return True
 
 
 def renew_tor_circuit():
     """Request a new Tor circuit (new exit node = new IP).
     
     Useful when a site blocks your current exit node.
-    Requires ControlPort 9051 to be enabled in torrc.
+    Requires ControlPort (9051 or 9151) to be enabled in torrc.
+    Returns True if circuit was renewed and verified, False otherwise.
     """
     if not USE_TOR:
         return False
@@ -247,15 +369,20 @@ def renew_tor_circuit():
         from stem import Signal
         from stem.control import Controller
         
-        import os
         default_control = 9151 if '9150' in TOR_PROXY else 9051
         control_port = int(os.getenv('TOR_CONTROL_PORT', default_control))
         with Controller.from_port(port=control_port) as controller:
             controller.authenticate()
             controller.signal(Signal.NEWNYM)
             print("[+] New Tor circuit requested — waiting 10s for build...")
-            time.sleep(10)  # circuits take time to build
+            time.sleep(10)
+
+        if check_tor(force=True):
+            print("[+] Verified fresh Tor circuit is operational.")
             return True
+        else:
+            print("[-] Tor circuit requested but connection verification failed.")
+            return False
     except ImportError:
         print("[-] 'stem' library not installed — cannot renew circuit")
         return False
@@ -264,9 +391,6 @@ def renew_tor_circuit():
         return False
 
 
-# ── User-Agent Rotation Pool ─────────────────────────────────────
-
-# For .onion sites: Tor Browser variants (same family, slight version variation)
 # All Tor Browser users share this UA family — rotating too wildly is suspicious.
 TOR_USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0",
@@ -276,7 +400,6 @@ TOR_USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64; rv:115.0) Gecko/20100101 Firefox/115.0",
 ]
 
-# For clearnet: realistic modern browser UAs
 CLEARNET_USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
@@ -290,7 +413,6 @@ CLEARNET_USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
 ]
 
-# Common viewport sizes to rotate between
 VIEWPORT_SIZES = [
     {"width": 1920, "height": 1080},
     {"width": 1366, "height": 768},
@@ -301,9 +423,6 @@ VIEWPORT_SIZES = [
 ]
 
 
-# ── De-duplicated constants & helpers ────────────────────────────
-
-# Stealth init script — extracted from 3 identical copies
 _STEALTH_INIT_SCRIPT = """
     Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
     Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
@@ -373,7 +492,6 @@ def _apply_stealth(page):
     page.add_init_script(_STEALTH_INIT_SCRIPT)
 
 
-# Indicators that the site detected bot behavior and killed the session
 _SESSION_EXPIRED_INDICATORS = [
     "session expired",
     "session has expired",
@@ -397,25 +515,47 @@ def _is_session_expired_page(html):
     return any(indicator in lower for indicator in _SESSION_EXPIRED_INDICATORS)
 
 
+def _bump_consecutive_failures():
+    """Increment consecutive failure counter thread-safely and return new value."""
+    global _consecutive_failures
+    with _state_lock:
+        _consecutive_failures += 1
+        return _consecutive_failures
+
+
+def _reset_consecutive_failures():
+    """Reset consecutive failure counter thread-safely."""
+    global _consecutive_failures
+    with _state_lock:
+        _consecutive_failures = 0
+
+
+def _close_playwright_handles(page=None, context=None, browser=None, pw_ctx=None):
+    """Best-effort close of Playwright objects without letting one failure skip the rest."""
+    for label, obj, method in (
+        ("page", page, "close"),
+        ("context", context, "close"),
+        ("browser", browser, "close"),
+        ("playwright", pw_ctx, "stop"),
+    ):
+        if obj is None:
+            continue
+        try:
+            getattr(obj, method)()
+        except Exception as exc:
+            log_failure(f"Error tearing down Playwright {label}", exc, level=logging.DEBUG, logger_name="browser")
+
+
 def ensure_clean_browser():
     """Reset any stale Playwright state. Call before spawning a new crawl thread."""
     global _playwright_context, _browser, _context, _page
-    if _page:
-        try: _page.close()
-        except: pass
-    if _context:
-        try: _context.close()
-        except: pass
-    if _browser:
-        try: _browser.close()
-        except: pass
-    if _playwright_context:
-        try: _playwright_context.stop()
-        except: pass
+    _close_playwright_handles(page=_page, context=_context, browser=_browser, pw_ctx=_playwright_context)
     _playwright_context = None
     _browser = None
     _context = None
     _page = None
+    _reset_consecutive_failures()
+    _drain_captcha_queue()
 
 
 def init_browser(renew_identity=False):
@@ -427,12 +567,13 @@ def init_browser(renew_identity=False):
     global _playwright_context, _browser, _context, _page
 
     if _playwright_context is not None:
-        return
+        return True
 
-    # Get a fresh Tor IP on startup or identity renewal
     if USE_TOR and renew_identity:
         print("\n[*] Requesting new Tor identity before browser launch...")
-        renew_tor_circuit()
+        if not renew_tor_circuit():
+            print("[-] Warning: Tor circuit renewal failed or unverified.")
+            return False
 
     print("\n[*] Initializing Playwright browser engine...")
     _playwright_context = sync_playwright().start()
@@ -450,7 +591,6 @@ def init_browser(renew_identity=False):
         args=_build_launch_args()
     )
 
-    # Only load old session state if NOT renewing identity
     if not renew_identity and os.path.exists(STATE_FILE) and os.path.getsize(STATE_FILE) > 0:
         print(f"[*] Loading authenticated session state from {STATE_FILE}")
 
@@ -463,24 +603,19 @@ def init_browser(renew_identity=False):
 def close_browser():
     """Clean up Playwright resources."""
     global _playwright_context, _browser, _context, _page
-    if _context:
-        try:
-            _context.storage_state(path=STATE_FILE)
-            print(f"[*] Browser session state saved to {STATE_FILE}")
-        except:
-            pass
-
-    if _browser:
-        try: _browser.close()
-        except: pass
-    if _playwright_context:
-        try: _playwright_context.stop()
-        except: pass
-
-    _playwright_context = None
-    _browser = None
-    _context = None
-    _page = None
+    try:
+        if _context:
+            try:
+                _context.storage_state(path=STATE_FILE)
+                print(f"[*] Browser session state saved to {STATE_FILE}")
+            except Exception as exc:
+                log_failure("Failed saving browser state on close", exc, level=logging.DEBUG, logger_name="browser")
+    finally:
+        _close_playwright_handles(browser=_browser, pw_ctx=_playwright_context)
+        _playwright_context = None
+        _browser = None
+        _context = None
+        _page = None
 
 
 class CrawlAbortedByUser(Exception):
@@ -495,7 +630,9 @@ class SessionExpired(Exception):
     """
 
 
-# ── Human-Like Behavior Simulation ───────────────────────────────
+class TorOPSECError(Exception):
+    """Raised when an operation violates Tor OPSEC rules (e.g. .onion without active Tor)."""
+
 
 def _simulate_human(page):
     """Simulate human browsing behavior to reduce bot fingerprinting.
@@ -505,7 +642,6 @@ def _simulate_human(page):
       - Small mouse movements to random coordinates
       - Brief pauses between actions
     """
-    # Get page dimensions
     viewport = page.viewport_size
     if not viewport:
         return
@@ -513,28 +649,21 @@ def _simulate_human(page):
     width = viewport["width"]
     height = viewport["height"]
     
-    # 1. Small random pause (human reaction time)
     time.sleep(random.uniform(0.5, 1.5))
     
-    # 2. Mouse movement to a random spot (simulates looking around)
     for _ in range(random.randint(1, 3)):
         x = random.randint(100, max(101, width - 100))
         y = random.randint(100, max(101, height - 100))
         page.mouse.move(x, y)
         time.sleep(random.uniform(0.1, 0.4))
     
-    # 3. Scroll down 30-70% of the page
     scroll_percent = random.uniform(0.3, 0.7)
     page.evaluate(f"window.scrollTo(0, document.body.scrollHeight * {scroll_percent})")
     time.sleep(random.uniform(0.5, 1.0))
     
-    # 4. Occasionally scroll back up a bit (humans do this)
     if random.random() < 0.3:
         page.evaluate("window.scrollBy(0, -200)")
         time.sleep(random.uniform(0.3, 0.6))
-
-
-
 
 
 def new_identity():
@@ -544,8 +673,11 @@ def new_identity():
     and invalidates the session. It:
       1. Closes the current browser completely
       2. Deletes the old session state file (cookies are burned)
-      3. Requests a new Tor circuit (new exit IP)
+      3. Requests a new Tor circuit (new exit IP) and verifies it
       4. Re-launches the browser with a fresh fingerprint
+      
+    Returns:
+        bool: True if new identity was successfully established, False otherwise.
     """
     global _playwright_context, _browser, _context, _page
     
@@ -553,32 +685,30 @@ def new_identity():
     print("[*] STARTING NEW IDENTITY")
     print(f"{'='*60}")
     
-    # Step 1: Kill the current browser entirely
-    if _browser:
-        try: _browser.close()
-        except: pass
-    if _playwright_context:
-        try: _playwright_context.stop()
-        except: pass
+    _close_playwright_handles(browser=_browser, pw_ctx=_playwright_context)
     
     _playwright_context = None
     _browser = None
     _context = None
     _page = None
+    _drain_captcha_queue()
     
-    # Step 2: Delete old session state (cookies are compromised)
     if os.path.exists(STATE_FILE):
         os.remove(STATE_FILE)
         print("[*] Old session state deleted.")
     
-    # Step 3: Launch fresh browser with new Tor circuit
-    init_browser(renew_identity=True)
+    if USE_TOR:
+        if not renew_tor_circuit():
+            print("[-] CRITICAL: Failed to establish and verify a new Tor circuit.")
+            print(f"{'='*60}\n")
+            return False
+
+    init_browser(renew_identity=False)
     
     print(f"[*] New identity established.")
     print(f"{'='*60}\n")
+    return True
 
-
-# ── CAPTCHA Solving — broken down from monolithic function ───────
 
 def _check_session_status(page):
     """Check if the current page is a session-expired page.
@@ -600,7 +730,7 @@ def _launch_visible_browser(url, ua):
     """
     print("\n[*] Spawning visible browser window for manual bypass...")
     _browser_vis = _playwright_context.chromium.launch(
-        headless=False,  # <--- VISIBLE MODE
+        headless=False,
         args=_build_launch_args()
     )
     
@@ -620,18 +750,24 @@ def _launch_visible_browser(url, ua):
 def _get_user_captcha_choice():
     """Get the user's choice for how to handle a CAPTCHA/challenge.
     
-    In dashboard mode, waits for the dashboard API event.
+    In dashboard mode, drains any stale signals, advertises the pending challenge,
+    and waits with a bounded timeout on a single-slot queue so responses cannot
+    be overwritten and abandoned sessions cannot deadlock the crawler thread.
     In CLI mode, prompts the user interactively.
     
     Returns:
-        str: user choice ('exit', 'new', or empty for continue)
+        str: user choice ('exit', 'new', 'resume', or empty for continue)
     """
     if DASHBOARD_MODE:
-        print(">>> [DASHBOARD_CAPTCHA_PENDING]")  # Magic string for dashboard.py to catch
-        # Wait for the dashboard API to trigger the event
-        dashboard_captcha_event.clear()
-        dashboard_captcha_event.wait()
-        return dashboard_captcha_action or 'exit'
+        _drain_captcha_queue()
+        notify_captcha_pending()
+        print("[*] CAPTCHA pending — awaiting dashboard action...")
+        try:
+            action = dashboard_captcha_queue.get(timeout=CAPTCHA_TIMEOUT_SECONDS)
+            return action if action in VALID_CAPTCHA_ACTIONS else "exit"
+        except queue.Empty:
+            print(f"[!] HITL challenge timed out after {CAPTCHA_TIMEOUT_SECONDS}s — aborting crawl safely.")
+            return "exit"
     else:
         print(">>>")
         print(">>> Options:")
@@ -676,9 +812,7 @@ def solve_captcha_interactive(url):
     if DASHBOARD_MODE:
         print("[!] CAPTCHA detected while in DASHBOARD_MODE.")
         print("[!] Setting state to pending and waiting for dashboard resolution...")
-        # Note: We do NOT raise CrawlAbortedByUser here anymore. We will pause below.
-    
-    # First, check if this is a session-expired page (not just a CAPTCHA)
+
     _, is_session_dead = _check_session_status(_page)
     
     print(f"\n{'!'*60}")
@@ -689,48 +823,51 @@ def solve_captcha_interactive(url):
     print(f"URL: {url}")
     print(f"{'!'*60}")
     
-    # Save state from headless and close it
     if _context:
-        _context.storage_state(path=STATE_FILE)
-        _browser.close()
+        try:
+            _context.storage_state(path=STATE_FILE)
+        except Exception as exc:
+            log_failure("Failed saving session state before HITL", exc, level=logging.DEBUG, logger_name="browser")
+        finally:
+            _close_playwright_handles(browser=_browser)
         
     ua = _get_random_ua()
     
-    # Launch visible browser for manual bypass
     vis_browser, vis_context, vis_page = _launch_visible_browser(url, ua)
     
     print("\n>>> Please solve the CAPTCHA, Login, or refresh the session in the opened browser window.")
     print(">>> Wait until you see the actual forum content.")
     
-    user_choice = _get_user_captcha_choice()
-    
-    if user_choice in ['exit', 'quit', 'q']:
-        print("\n[*] User chose to abort the crawl. Cleaning up visible browser...")
-        vis_browser.close()
-        raise CrawlAbortedByUser("Crawl aborted by user during challenge.")
-    
-    if user_choice in ['new', 'identity', 'renew', 'n']:
-        print("\n[*] User chose new identity. Closing visible browser...")
-        vis_browser.close()
-        try: _playwright_context.stop()
-        except: pass
-        _playwright_context = None
-        _browser = None
-        _context = None
-        _page = None
-        raise SessionExpired("User requested new identity after bot detection.")
-    
-    # User pressed ENTER — manual bypass completed, resume
-    # Save the newly authenticated state (with the CAPTCHA clearance cookies)
-    vis_context.storage_state(path=STATE_FILE)
-    html = vis_page.content()
-    
-    # Close visible browser
-    vis_browser.close()
+    html = ""
+    try:
+        user_choice = _get_user_captcha_choice()
+        
+        if user_choice in ['exit', 'quit', 'q']:
+            print("\n[*] User chose to abort the crawl. Cleaning up visible browser...")
+            raise CrawlAbortedByUser("Crawl aborted by user during challenge.")
+        
+        if user_choice in ['new', 'identity', 'renew', 'n']:
+            print("\n[*] User chose new identity. Closing visible browser...")
+            try: vis_browser.close()
+            except Exception: pass
+            try: _playwright_context.stop()
+            except Exception: pass
+            _playwright_context = None
+            _browser = None
+            _context = None
+            _page = None
+            raise SessionExpired("User requested new identity after bot detection.")
+        
+        vis_context.storage_state(path=STATE_FILE)
+        html = vis_page.content()
+    finally:
+        try:
+            vis_browser.close()
+        except Exception:
+            pass
     
     print("[*] State saved. Resuming headless scraping...\n")
     
-    # Re-launch headless browser with the new state
     _resume_headless_browser()
     
     return html
@@ -756,27 +893,25 @@ def _handle_wait_challenges(page):
             _simulate_human(page)
             page.wait_for_timeout(10000)
             
-            # Refresh HTML after waiting
             html = page.content().lower()
             if any(k in html for k in ["ddos-guard", "cloudflare", "just a moment", "checking your browser", "endgame", "please wait"]):
                 print("[*] Challenge still active. Looking for checkboxes or verify buttons...")
-                # Turnstile or similar checkboxes
                 for _ in range(3):
                     try:
                         checkbox = page.locator("input[type='checkbox']").first
                         if checkbox and checkbox.is_visible(timeout=1000):
                             checkbox.click(timeout=2000)
                             page.wait_for_timeout(3000)
-                    except:
-                        pass
-                        
+                    except Exception as exc:
+                        log_failure("Wait-challenge checkbox interaction failed", exc, level=logging.DEBUG, logger_name="browser")
+
                     try:
                         btn = page.locator("button:has-text('Verify'), button:has-text('Continue'), button[name='submit']").first
                         if btn and btn.is_visible(timeout=1000):
                             btn.click(timeout=2000)
                             page.wait_for_timeout(3000)
-                    except:
-                        pass
+                    except Exception as exc:
+                        log_failure("Wait-challenge button interaction failed", exc, level=logging.DEBUG, logger_name="browser")
                 page.wait_for_timeout(3000)
     except Exception as e:
         print(f"[-] Auto-challenge resolution failed: {e}")
@@ -788,68 +923,76 @@ def fetch_page(url, retries=3):
     Automatically handles CAPTCHA interruptions.
     
     Enhanced with:
+      - Cooperative stop_requested checks and interruptible backoff
+      - Tor OPSEC gate checking before navigation
       - Human-like behavior simulation after page load
       - Tor circuit renewal on repeated failures
       - Adaptive retry delays based on consecutive failures
     """
-    global _page, _consecutive_failures
-    if _page is None:
-        init_browser()
-        
+    global _page
+    if is_stop_requested():
+        raise CrawlAbortedByUser("Crawl stopped by user.")
+
     url = _ensure_url_scheme(url)
     if not url:
         return None
+
+    ensure_tor_safety(url)
+
+    if _page is None:
+        init_browser()
         
     for attempt in range(retries):
+        failures = 0
         try:
+            if is_stop_requested():
+                raise CrawlAbortedByUser("Crawl stopped by user.")
             if _page is None:
                 raise CrawlAbortedByUser("Browser was closed externally (e.g. by Dashboard).")
                 
             print(f"[*] Navigating to {url} (Attempt {attempt+1})...")
-            # Wait until DOM content is loaded. 'networkidle' is too flaky on Tor.
+            # 'networkidle' is too flaky on Tor.
             response = _page.goto(url, wait_until="domcontentloaded", timeout=180000)
+            if is_stop_requested():
+                raise CrawlAbortedByUser("Crawl stopped by user.")
             
-            # Wait a tiny bit extra for DOM to settle
             _page.wait_for_timeout(random.randint(1500, 3000))
             
-            # Simulate human browsing behavior
             _simulate_human(_page)
+            if is_stop_requested():
+                raise CrawlAbortedByUser("Crawl stopped by user.")
             
-            # Wait for any JS challenges to resolve automatically
             _handle_wait_challenges(_page)
             
             html = _page.content()
             
-            # Get current URL (may differ from requested if site redirected)
             current_url = _page.url
             
             score, reasons = _score_challenge_signals(html, current_url=current_url, original_url=url)
             if _is_challenge_page(score, html=html, url=current_url):
                 print(f"[!] Challenge detected (score={score}, signals={reasons})")
-                _consecutive_failures += 1
+                failures = _bump_consecutive_failures()
                 return solve_captcha_interactive(url)
             
-            # If we get an error code, fallback to retry
             if response and response.status in [403, 429, 500, 502, 503]:
-                _consecutive_failures += 1
+                failures = _bump_consecutive_failures()
                 print(f"[-] Status {response.status} on attempt {attempt+1}")
                 
-                # On 403, try renewing Tor circuit
-                if response.status == 403 and attempt < retries - 1:
+                if response.status == 403 and attempt < retries - 1 and not is_stop_requested():
                     print("[!] 403 Forbidden — trying new Tor circuit...")
                     renew_tor_circuit()
             else:
-                _consecutive_failures = 0  # Reset on success
+                _reset_consecutive_failures()
                 return html
                 
         except CrawlAbortedByUser:
-            # Propagate the abort signal up to the main crawler loop immediately
             raise
         except SessionExpired:
-            # Propagate so the crawler can restart with a new identity
             raise
         except Exception as e:
-            _consecutive_failures += 1
+            if is_stop_requested():
+                raise CrawlAbortedByUser("Crawl stopped by user.")
+            failures = _bump_consecutive_failures()
             err_str = str(e).lower()
             if "net::err_proxy_connection_failed" in err_str:
                 print(f"[-] Tor Proxy Connection Failed! Ensure Tor is running on port 9150.")
@@ -862,11 +1005,14 @@ def fetch_page(url, retries=3):
                 return None
             print(f"[-] Playwright attempt {attempt+1} failed: {e}")
             
-        # Adaptive retry delay: increases with consecutive failures
-        failure_multiplier = min(1 + (_consecutive_failures * 0.3), 4.0)
+        if is_stop_requested():
+            raise CrawlAbortedByUser("Crawl stopped by user.")
+
+        failure_multiplier = min(1 + (failures * 0.3), 4.0)
         base_delay = min(3 * (2 ** attempt), 30)
         delay = (base_delay + random.uniform(0, base_delay * 0.5)) * failure_multiplier
         print(f"  -> Retrying in {delay:.1f}s (failure multiplier: {failure_multiplier:.1f}x)")
-        time.sleep(delay)
+        if stop_requested.wait(timeout=delay):
+            raise CrawlAbortedByUser("Crawl stopped by user.")
         
     return None

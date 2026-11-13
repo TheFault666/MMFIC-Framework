@@ -1,15 +1,65 @@
+import math
 import numpy as np
 import re
 import string
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 import dateparser
 from urllib.parse import urlparse
 
+_NUMERIC_EPOCH_RE = re.compile(r"^\d{9,13}(?:\.\d+)?$")
 
-# ── Function words (style markers, not content-dependent) ────────
-# These are the most reliable stylometric features — people use
-# function words unconsciously and consistently across contexts.
+
+def parse_timestamp_epoch(ts):
+    """Parse an epoch int/float, numeric string, ISO string, or English date to UTC seconds."""
+    if ts is None or isinstance(ts, bool):
+        return None
+    if isinstance(ts, (int, float)):
+        return float(ts) if math.isfinite(ts) and ts >= 0 else None
+    if not isinstance(ts, str):
+        return None
+
+    cleaned = ts.strip()
+    if not cleaned or cleaned.upper() == "N/A":
+        return None
+    if _NUMERIC_EPOCH_RE.match(cleaned):
+        val = float(cleaned)
+        return val if math.isfinite(val) and val >= 0 else None
+
+    try:
+        iso_str = f"{cleaned[:-1]}+00:00" if cleaned.endswith(("Z", "z")) else cleaned
+        dt = datetime.fromisoformat(iso_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except (OSError, OverflowError, ValueError):
+        pass
+
+    dt = dateparser.parse(
+        cleaned,
+        languages=["en"],
+        settings={
+            "TIMEZONE": "UTC",
+            "TO_TIMEZONE": "UTC",
+            "RETURN_AS_TIMEZONE_AWARE": True,
+        },
+    )
+    if not dt:
+        return None
+    try:
+        return dt.timestamp()
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+# Canonical 292-dim vector: 16 stylometric + 212 lexical (136 function + 68 slang + 8 stats)
+# + 10 behavioral + 24 timeprint + 10 subforum + 20 LDA topics.
+CANONICAL_BOARD_SLOTS = 10
+CANONICAL_LDA_TOPICS = 20
+CANONICAL_FEATURE_DIM = 292
+
+
+# Function words are used unconsciously and consistently across contexts.
 FUNCTION_WORDS = [
     "the", "a", "an", "and", "or", "but", "if", "in", "on", "at",
     "to", "for", "of", "with", "by", "from", "as", "is", "was",
@@ -31,7 +81,6 @@ FUNCTION_WORDS = [
     "mostly", "usually", "around", "against", "among"
 ]
 
-# Common internet slang / abbreviations
 SLANG_WORDS = [
     "lol", "lmao", "rofl", "bruh", "tbh", "imo", "imho", "afaik",
     "smh", "fwiw", "tl;dr", "iirc", "ftw", "idk", "ngl", "fr",
@@ -54,8 +103,6 @@ def _calculate_rate_per_100(count, n_words):
     """Normalize a count to a rate per 100 words."""
     return _safe_divide_values(count * 100, n_words)
 
-
-# ── 1. STYLOMETRIC FEATURES ─────────────────────────────────────
 
 def _compute_word_level_features(words):
     word_lengths = [len(w) for w in words]
@@ -144,8 +191,6 @@ def _extract_stylometric_features(posts):
     ]
 
 
-# ── 2. LEXICAL FEATURES ─────────────────────────────────────────
-
 def _compute_function_word_rates(word_freq, n_words):
     return [_calculate_rate_per_100(word_freq.get(fw, 0), n_words) for fw in FUNCTION_WORDS]
 
@@ -207,14 +252,12 @@ def _extract_lexical_features(posts):
     ]
 
 
-# ── 3. BEHAVIORAL FEATURES ──────────────────────────────────────
-
 def _compute_post_length_stats(post_lengths, n_posts):
     avg_post_len = np.mean(post_lengths)
     std_post_len = np.std(post_lengths) if len(post_lengths) > 1 else 0.0
     median_post_len = np.median(post_lengths)
-    short_posts = sum(1 for l in post_lengths if l < 20)
-    long_posts = sum(1 for l in post_lengths if l > 100)
+    short_posts = sum(1 for post_len in post_lengths if post_len < 20)
+    long_posts = sum(1 for post_len in post_lengths if post_len > 100)
     short_ratio = _safe_divide_values(short_posts, n_posts)
     long_ratio = _safe_divide_values(long_posts, n_posts)
     length_cv = _safe_divide_values(std_post_len, avg_post_len)
@@ -222,7 +265,11 @@ def _compute_post_length_stats(post_lengths, n_posts):
 
 
 def _compute_temporal_features(timestamps):
-    valid_ts = [t for t in timestamps if isinstance(t, (int, float))]
+    valid_ts = []
+    for t in timestamps:
+        epoch = parse_timestamp_epoch(t)
+        if epoch is not None:
+            valid_ts.append(epoch)
     if len(valid_ts) < 2:
         return 0.0, 0.0
     valid_ts.sort()
@@ -269,16 +316,17 @@ def _extract_behavioral_features(posts, timestamps):
 
 
 def _parse_timestamp_to_hour(ts):
-    """Parse a single timestamp (string or epoch) to a posting hour (0-23).
+    """Parse a single timestamp (string or epoch) deterministically to a UTC hour (0-23).
     
     Returns the hour integer, or None if parsing fails.
     """
-    if isinstance(ts, str):
-        dt = dateparser.parse(ts)
-        return dt.hour if dt else None
-    if isinstance(ts, (int, float)):
-        return datetime.fromtimestamp(ts).hour
-    return None
+    epoch = parse_timestamp_epoch(ts)
+    if epoch is None:
+        return None
+    try:
+        return datetime.fromtimestamp(epoch, tz=timezone.utc).hour
+    except (OSError, OverflowError, ValueError):
+        return None
 
 
 def _extract_timeprint_features(timestamps):
@@ -296,7 +344,7 @@ def _extract_timeprint_features(timestamps):
     valid_count = 0
     
     for ts in timestamps:
-        if ts == "N/A" or not ts:
+        if ts in (None, "", "N/A"):
             continue
         hour = _parse_timestamp_to_hour(ts)
         if hour is not None:
@@ -312,29 +360,31 @@ def _extract_timeprint_features(timestamps):
 def _extract_subforum_features(sources, board_vocab=None):
     """Normalized frequency vector of sub-forum posting behavior.
     
+    Always produces a fixed vector of CANONICAL_BOARD_SLOTS (10) features.
+    If board_vocab has fewer than 10 entries or is None, unoccupied slots are 0.0.
+    
     Args:
         sources: list of source URLs
-        board_vocab: list of top N board path segments
+        board_vocab: list of top board path segments
     Returns:
-        list of floats (len=len(board_vocab) or 10 if none)
+        list of floats (len=CANONICAL_BOARD_SLOTS)
     """
-    vocab_size = len(board_vocab) if board_vocab else 10
+    counts = np.zeros(CANONICAL_BOARD_SLOTS, dtype=np.float64)
     if not sources or not board_vocab:
-        return [0.0] * vocab_size
+        return counts.tolist()
         
-    counts = np.zeros(vocab_size)
+    active_vocab = board_vocab[:CANONICAL_BOARD_SLOTS]
     valid_count = 0
     
     for src in sources:
         if not src or src == "manual":
             continue
         parsed = urlparse(src)
-        # Use the first meaningful path segment as the board/sub-forum
         parts = [p for p in parsed.path.split('/') if p]
         board = parts[0] if parts else "root"
         
-        if board in board_vocab:
-            counts[board_vocab.index(board)] += 1
+        if board in active_vocab:
+            counts[active_vocab.index(board)] += 1
             valid_count += 1
             
     if valid_count > 0:
@@ -346,40 +396,43 @@ def _extract_subforum_features(sources, board_vocab=None):
 def _extract_lda_features(posts, lda_model=None, lda_vectorizer=None):
     """Latent Dirichlet Allocation topic distribution.
     
+    Always produces a fixed vector of CANONICAL_LDA_TOPICS (20) features.
+    If lda_model or lda_vectorizer is absent, or posts is empty, returns zeros.
+    
     Args:
         posts: list of strings
         lda_model: fitted scikit-learn LatentDirichletAllocation
         lda_vectorizer: fitted scikit-learn CountVectorizer
     Returns:
-        list of floats (len=lda_model.n_components, or empty if no model)
+        list of floats (len=CANONICAL_LDA_TOPICS)
     """
-    if not lda_model or not lda_vectorizer:
-        return []
+    if not lda_model or not lda_vectorizer or not posts:
+        return [0.0] * CANONICAL_LDA_TOPICS
         
-    if not posts:
-        return [0.0] * lda_model.n_components
-        
-    text = " ".join(posts)
-    X = lda_vectorizer.transform([text])
-    topic_dist = lda_model.transform(X)[0]
-    return topic_dist.tolist()
+    try:
+        text = " ".join(posts)
+        X = lda_vectorizer.transform([text])
+        topic_dist = lda_model.transform(X)[0].tolist()
+        if len(topic_dist) < CANONICAL_LDA_TOPICS:
+            topic_dist = topic_dist + [0.0] * (CANONICAL_LDA_TOPICS - len(topic_dist))
+        elif len(topic_dist) > CANONICAL_LDA_TOPICS:
+            topic_dist = topic_dist[:CANONICAL_LDA_TOPICS]
+        return topic_dist
+    except Exception:
+        return [0.0] * CANONICAL_LDA_TOPICS
 
-
-# ── PUBLIC API ───────────────────────────────────────────────────
 
 def _generate_empty_feature_vector(lda_model=None, board_vocab=None):
-    n_stylo = len(_extract_stylometric_features([]))
-    n_lexic = len(_extract_lexical_features([]))
-    n_behav = 10
-    n_time  = 24
-    n_board = len(board_vocab) if board_vocab else 10
-    n_lda   = lda_model.n_components if lda_model else 0
-    return np.zeros(n_stylo + n_lexic + n_behav + n_time + n_board + n_lda)
+    """Return an empty feature vector with guaranteed canonical dimension (292)."""
+    return np.zeros(CANONICAL_FEATURE_DIM, dtype=np.float64)
 
 
 def extract_user_features(posts, timestamps=None, sources=None, 
                           lda_model=None, lda_vectorizer=None, board_vocab=None):
     """Extract the full feature vector for one user.
+    
+    Guarantees a fixed vector length of CANONICAL_FEATURE_DIM (292) across
+    all inputs, whether LDA or board_vocab is present or not.
     
     Args:
         posts: list of strings (all posts by this user)
@@ -390,7 +443,7 @@ def extract_user_features(posts, timestamps=None, sources=None,
         board_vocab: list of board names (optional)
     
     Returns:
-        numpy array of shape (n_features,)
+        numpy array of shape (CANONICAL_FEATURE_DIM,)
     """
     timestamps = timestamps or []
     sources = sources or []
@@ -403,24 +456,25 @@ def extract_user_features(posts, timestamps=None, sources=None,
     behav = _extract_behavioral_features(posts, timestamps)
     timeprint = _extract_timeprint_features(timestamps)
     subforums = _extract_subforum_features(sources, board_vocab)
+    lda_feats = _extract_lda_features(posts, lda_model, lda_vectorizer)
     
-    feats = stylo + lexic + behav + timeprint + subforums
-    
-    if lda_model and lda_vectorizer:
-        lda_feats = _extract_lda_features(posts, lda_model, lda_vectorizer)
-        feats += lda_feats
+    feats = stylo + lexic + behav + timeprint + subforums + lda_feats
+
+    if len(feats) < CANONICAL_FEATURE_DIM:
+        feats = feats + [0.0] * (CANONICAL_FEATURE_DIM - len(feats))
+    elif len(feats) > CANONICAL_FEATURE_DIM:
+        feats = feats[:CANONICAL_FEATURE_DIM]
     
     return np.array(feats, dtype=np.float64)
 
 
 def get_feature_count():
-    """Get the total number of features."""
-    dummy = extract_user_features(["test post"])
-    return len(dummy)
+    """Get the total number of features (canonical 292)."""
+    return CANONICAL_FEATURE_DIM
 
 
-def get_feature_names(lda_topics=0, board_vocab=None):
-    """Get human-readable names for all features."""
+def get_feature_names(lda_topics=CANONICAL_LDA_TOPICS, board_vocab=None):
+    """Get human-readable names for all features (always exactly 292 names)."""
     stylo_names = [
         "avg_word_len", "std_word_len", "avg_sent_len", "std_sent_len",
         "type_token_ratio", "hapax_ratio", "comma_rate", "period_rate",
@@ -445,9 +499,17 @@ def get_feature_names(lda_topics=0, board_vocab=None):
     
     time_names = [f"tp_hour_{str(i).zfill(2)}" for i in range(24)]
     
-    board_size = len(board_vocab) if board_vocab else 10
-    board_names = [f"board_{i}" for i in range(board_size)]
+    board_names = []
+    for i in range(CANONICAL_BOARD_SLOTS):
+        if board_vocab and i < len(board_vocab):
+            board_names.append(f"board_{board_vocab[i]}")
+        else:
+            board_names.append(f"board_slot_{i}")
     
-    lda_names = [f"lda_topic_{i}" for i in range(lda_topics)]
+    lda_names = [f"lda_topic_{i}" for i in range(CANONICAL_LDA_TOPICS)]
     
-    return stylo_names + lexic_names + behav_names + time_names + board_names + lda_names
+    names = stylo_names + lexic_names + behav_names + time_names + board_names + lda_names
+    assert len(names) == CANONICAL_FEATURE_DIM, (
+        f"Feature names count mismatch: expected {CANONICAL_FEATURE_DIM}, got {len(names)}"
+    )
+    return names

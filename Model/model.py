@@ -26,8 +26,13 @@ from lightgbm import LGBMClassifier
 from sklearn.model_selection import cross_val_score, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
-    classification_report,
     roc_auc_score, average_precision_score
+)
+
+from .features import CANONICAL_FEATURE_DIM
+from .thresholds import (
+    MATCH_THRESHOLD, MISMATCH_THRESHOLD, COSINE_TIE_BREAKER,
+    VERDICT_MATCH, VERDICT_MISMATCH, VERDICT_UNCERTAIN
 )
 
 MODEL_DIR = Path(__file__).resolve().parent
@@ -133,6 +138,11 @@ class AuthorSimilarityModel:
         X = np.asarray(X)
         y = np.asarray(y)
         
+        if X.ndim != 2 or X.shape[1] != CANONICAL_FEATURE_DIM:
+            raise ValueError(
+                f"Training data feature dimension mismatch: expected (*, {CANONICAL_FEATURE_DIM}), got {X.shape}"
+            )
+        
         X_scaled = self.scaler.fit_transform(X)
         cv_scores, cv_acc = self._run_cross_validation(X_scaled, y)
         
@@ -182,6 +192,16 @@ class AuthorSimilarityModel:
         """
         self._check_model_is_trained()
         
+        feature_diff = np.asarray(feature_diff)
+        if feature_diff.ndim != 2 or feature_diff.shape[0] != 1:
+            raise ValueError(f"Expected 2D array of shape (1, N), got {feature_diff.shape}")
+        
+        expected_dim = getattr(self.classifier, 'n_features_in_', getattr(self.scaler, 'n_features_in_', CANONICAL_FEATURE_DIM))
+        if feature_diff.shape[1] != expected_dim:
+            raise ValueError(
+                f"Feature vector dimension mismatch: model expects {expected_dim}, got {feature_diff.shape[1]}"
+            )
+        
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=UserWarning, message=".*X does not have valid feature names.*")
             X_scaled = self.scaler.transform(feature_diff)
@@ -189,32 +209,32 @@ class AuthorSimilarityModel:
             
         return float(prob[0])
     
-    def _evaluate_tie_breaker(self, score, feature_diff, cosine_tie_breaker):
+    def _evaluate_tie_breaker(self, score, feature_diff, cosine_tie_breaker=COSINE_TIE_BREAKER):
         """Evaluate tie breaking logic and return a verdict and reason."""
         if feature_diff.shape[1] >= 272:
             tie_breaker_diff = feature_diff[0, 238:272]
             magnitude = np.linalg.norm(tie_breaker_diff)
             
             if magnitude < (1.0 - cosine_tie_breaker) * 5.0 and score > 0.5:
-                return "MATCH", f"Promoted by tie-breaker (magnitude: {magnitude:.3f})"
+                return VERDICT_MATCH, f"Promoted by tie-breaker (magnitude: {magnitude:.3f})"
             if magnitude > 2.0:
-                return "MISMATCH", f"Demoted by tie-breaker (magnitude: {magnitude:.3f})"
-        return "UNCERTAIN", "Remains uncertain after tie-breaker"
+                return VERDICT_MISMATCH, f"Demoted by tie-breaker (magnitude: {magnitude:.3f})"
+        return VERDICT_UNCERTAIN, "Remains uncertain after tie-breaker"
 
-    def _resolve_twd_verdict(self, score, feature_diff, match_threshold, mismatch_threshold, cosine_tie_breaker):
+    def _resolve_twd_verdict(self, score, feature_diff, match_threshold=MATCH_THRESHOLD, mismatch_threshold=MISMATCH_THRESHOLD, cosine_tie_breaker=COSINE_TIE_BREAKER):
         """Apply Three-Way Decision logic to a raw similarity score.
         
         Returns (score, verdict, metadata) without modifying any state.
         """
         if score >= match_threshold:
-            return score, "MATCH", {"reason": "Confident match by LightGBM"}
+            return score, VERDICT_MATCH, {"reason": "Confident match by LightGBM"}
         if score <= mismatch_threshold:
-            return score, "MISMATCH", {"reason": "Confident mismatch by LightGBM"}
+            return score, VERDICT_MISMATCH, {"reason": "Confident mismatch by LightGBM"}
         
         verdict, reason = self._evaluate_tie_breaker(score, feature_diff, cosine_tie_breaker)
         return score, verdict, {"reason": reason}
     
-    def predict_pair_twd(self, feature_diff, match_threshold=0.8, mismatch_threshold=0.3, cosine_tie_breaker=0.85):
+    def predict_pair_twd(self, feature_diff, match_threshold=MATCH_THRESHOLD, mismatch_threshold=MISMATCH_THRESHOLD, cosine_tie_breaker=COSINE_TIE_BREAKER):
         """Three-Way Decision prediction logic.
         
         Returns:
@@ -223,7 +243,7 @@ class AuthorSimilarityModel:
         score = self.predict_pair(feature_diff)
         return self._resolve_twd_verdict(score, feature_diff, match_threshold, mismatch_threshold, cosine_tie_breaker)
     
-    def predict_similarity(self, posts_a, posts_b, timestamps_a=None, timestamps_b=None, sources_a=None, sources_b=None, match_threshold=0.8, mismatch_threshold=0.3, cosine_tie_breaker=0.85):
+    def predict_similarity(self, posts_a, posts_b, timestamps_a=None, timestamps_b=None, sources_a=None, sources_b=None, match_threshold=MATCH_THRESHOLD, mismatch_threshold=MISMATCH_THRESHOLD, cosine_tie_breaker=COSINE_TIE_BREAKER):
         """Predict if two users are the same person from their posts.
         
         Args:
@@ -241,7 +261,7 @@ class AuthorSimilarityModel:
         )
         return self.predict_pair_twd(diff, match_threshold, mismatch_threshold, cosine_tie_breaker)
     
-    def batch_compare(self, profiles, match_threshold=0.8, mismatch_threshold=0.3, cosine_tie_breaker=0.85):
+    def batch_compare(self, profiles, match_threshold=MATCH_THRESHOLD, mismatch_threshold=MISMATCH_THRESHOLD, cosine_tie_breaker=COSINE_TIE_BREAKER):
         """Compare all user pairs and return a ranked similarity matrix with Three-Way verdicts.
         
         Args:

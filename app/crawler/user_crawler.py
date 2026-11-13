@@ -17,6 +17,7 @@ Key design decisions:
   - NEVER hop to a different domain.
 """
 
+import logging
 import time
 import random
 import re
@@ -24,20 +25,17 @@ from urllib.parse import urlparse, urljoin
 from bs4 import BeautifulSoup
 
 from app.crawler.browser_fetcher import (
-    fetch_page, close_browser, CrawlAbortedByUser, SessionExpired, new_identity
+    fetch_page, close_browser, CrawlAbortedByUser, SessionExpired, new_identity,
+    ensure_tor_safety, TorOPSECError
 )
+from app.crawler.crawl_utils import content_hash, is_substantial_post
+from app.diagnostics import log_failure, notify_posts_found
 from app.parser.router import extract_thread_data
 from app.parser.llm_parser import LLMQuotaExceeded, discover_profile_schema
 from app.parser.schema_parser import get_schema_for_url, get_profile_schema_for_url
-from app.crawler.crawl_utils import content_hash
 
-# Maximum pages to follow from a user's profile
 MAX_PROFILE_PAGES = 50
-
-# Maximum identity renewals
 MAX_IDENTITY_RENEWALS = 3
-
-# ── Profile URL patterns for different forum types ───────────────
 
 _PROFILE_PATTERNS = [
     "/u/{username}",                          # Lemmy, Tenebris, Dread
@@ -50,7 +48,7 @@ _PROFILE_PATTERNS = [
 ]
 
 _USER_POSTS_PATTERNS = [
-    "/u/{username}",                          # Lemmy shows posts on profile
+    "/u/{username}",                          # Lemmy
     "/user/{username}/posts",                 # Reddit
     "/user/{username}/submitted",             # Reddit old
     "/user/{username}/comments",              # Reddit comments
@@ -58,7 +56,6 @@ _USER_POSTS_PATTERNS = [
     "/users/{username}/activity",             # Discourse
 ]
 
-# Regex patterns to extract username from a profile URL
 _PROFILE_URL_REGEXES = [
     re.compile(r"/u/([^/?#]+)"),
     re.compile(r"/user/([^/?#]+?)(?:/(?:posts|submitted|comments|activity))?$"),
@@ -101,7 +98,6 @@ def crawl_user(forum_url, target_username=None, max_pages=MAX_PROFILE_PAGES):
       - A forum base URL + target_username
       - A direct profile URL (username auto-detected)
     """
-    # Auto-detect if the URL is a direct profile link
     direct_profile_url = None
     detected_base, detected_user = detect_profile_url(forum_url)
     
@@ -118,8 +114,12 @@ def crawl_user(forum_url, target_username=None, max_pages=MAX_PROFILE_PAGES):
         print("[!] No username provided and could not detect from URL.")
         return []
     
-    # (Removed onion scheme fixing)
-    
+    try:
+        ensure_tor_safety(forum_url)
+    except TorOPSECError as e:
+        print(f"\n[CRITICAL OPSEC ERROR] {e}")
+        return []
+
     base_url = _get_base_url(forum_url)
     parsed = urlparse(forum_url)
     allowed_domain = parsed.netloc
@@ -139,44 +139,51 @@ def crawl_user(forum_url, target_username=None, max_pages=MAX_PROFILE_PAGES):
     visited_urls = set()
     identity_renewals = 0
     
-    while identity_renewals <= MAX_IDENTITY_RENEWALS:
-        try:
-            all_data = _run_crawl_phases(
-                base_url, target_username, max_pages, visited_urls, seen_hashes, allowed_domain, direct_profile_url, all_data
-            )
-            
-            break
-            
-        except SessionExpired as e:
-            identity_renewals += 1
-            if identity_renewals > MAX_IDENTITY_RENEWALS:
-                print(f"[STOP] Max identity renewals reached.")
+    try:
+        while identity_renewals <= MAX_IDENTITY_RENEWALS:
+            try:
+                all_data = _run_crawl_phases(
+                    base_url, target_username, max_pages, visited_urls, seen_hashes, allowed_domain, direct_profile_url, all_data
+                )
+
                 break
-            print(f"\n[!] Session expired. New identity ({identity_renewals}/{MAX_IDENTITY_RENEWALS})...")
-            print(f"    Data preserved: {len(all_data)} posts")
-            new_identity()
-            time.sleep(random.uniform(10, 20))
-            
-        except CrawlAbortedByUser as e:
-            print(f"\n[STOP] {e}")
-            break
-        except LLMQuotaExceeded as e:
-            print(f"\n[STOP] LLM quota exceeded: {e}")
-            break
-    
+
+            except SessionExpired:
+                identity_renewals += 1
+                if identity_renewals > MAX_IDENTITY_RENEWALS:
+                    print("[STOP] Max identity renewals reached.")
+                    break
+                print(f"\n[!] Session expired. New identity ({identity_renewals}/{MAX_IDENTITY_RENEWALS})...")
+                print(f"    Data preserved: {len(all_data)} posts")
+                if not new_identity():
+                    print("[STOP] Aborting crawl: New Tor identity could not be verified.")
+                    break
+                time.sleep(random.uniform(10, 20))
+
+            except TorOPSECError as e:
+                print(f"\n[CRITICAL OPSEC ERROR] {e}")
+                break
+
+            except CrawlAbortedByUser as e:
+                print(f"\n[STOP] {e}")
+                break
+            except LLMQuotaExceeded as e:
+                print(f"\n[STOP] LLM quota exceeded: {e}")
+                break
+    finally:
+        close_browser()
+
     print(f"\n{'='*60}")
     print(f"User-targeted crawl complete: {target_username}")
     print(f"  Total posts collected: {len(all_data)}")
     print(f"  Pages visited:        {len(visited_urls)}")
     print(f"{'='*60}\n")
-    
-    close_browser()
+
     return all_data
 
 
 def _run_crawl_phases(base_url, target_username, max_pages, visited_urls, seen_hashes, allowed_domain, direct_profile_url, all_data):
     """Execute the three phases of user crawling."""
-    # Phase 1: Crawl profile page — extract posts directly
     print(f"\n[Phase 1] Crawling {target_username}'s profile...")
     profile_data, actual_profile_url, profile_html = _crawl_user_profile(
         base_url, target_username, max_pages,
@@ -187,7 +194,6 @@ def _run_crawl_phases(base_url, target_username, max_pages, visited_urls, seen_h
         all_data.extend(profile_data)
         print(f"[+] Profile crawl: {len(profile_data)} posts")
     
-    # Phase 2: Follow thread links to get full content + replies
     print(f"\n[Phase 2] Following thread links for full content...")
     thread_data = _crawl_user_threads(
         base_url, target_username, max_pages,
@@ -199,7 +205,6 @@ def _run_crawl_phases(base_url, target_username, max_pages, visited_urls, seen_h
         all_data.extend(thread_data)
         print(f"[+] Thread crawl: {len(thread_data)} more posts")
     
-    # Phase 3: Fallback — scan general forum threads
     if len(all_data) < 3:
         print(f"\n[Phase 3] Scanning forum threads for posts by {target_username}...")
         scan_data = _crawl_threads_for_user(
@@ -212,10 +217,6 @@ def _run_crawl_phases(base_url, target_username, max_pages, visited_urls, seen_h
             
     return all_data
 
-
-# ═══════════════════════════════════════════════════════════════════
-# Phase 1: Extract posts directly from the profile page
-# ═══════════════════════════════════════════════════════════════════
 
 def _build_profile_candidate_urls(base_url, username):
     """Build the list of candidate profile URLs from all known patterns."""
@@ -248,7 +249,6 @@ def _find_working_profile_url(candidate_urls, visited, allowed_domain, direct_pr
         if not html:
             continue
         
-        # Bug Fix 2: Trust direct profile URLs
         if direct_profile_url and url == direct_profile_url:
             print(f"  [+] Using provided direct profile URL!")
             return url, html
@@ -272,20 +272,15 @@ def _crawl_user_profile(base_url, username, max_pages, visited, seen_hashes, all
     """
     all_data = []
     
-    # Build candidate URLs
     if direct_profile_url:
-        # When a direct URL is given, try it first exclusively
         primary_candidates = [direct_profile_url]
     else:
-        # Only try patterns when no direct URL was provided
         primary_candidates = _build_profile_candidate_urls(base_url, username)
     
-    # Find the working profile page
     profile_url, profile_html = _find_working_profile_url(
         primary_candidates, visited, allowed_domain, direct_profile_url=direct_profile_url
     )
     
-    # Fallback: if direct URL didn't work, try pattern URLs
     if direct_profile_url and not profile_url:
         print(f"  [*] Direct URL didn't work, trying pattern URLs...")
         fallback_candidates = _build_profile_candidate_urls(base_url, username)
@@ -295,10 +290,8 @@ def _crawl_user_profile(base_url, username, max_pages, visited, seen_hashes, all
     
     if not profile_url:
         print(f"  [-] Could not find profile page for {username}")
-        # Bug Fix 1: Return tuple
         return all_data, None, None
     
-    # Extract posts from profile page (with pagination)
     pages_crawled = 0
     current_html = profile_html
     current_url = profile_url
@@ -306,7 +299,6 @@ def _crawl_user_profile(base_url, username, max_pages, visited, seen_hashes, all
     while pages_crawled < max_pages:
         pages_crawled += 1
         
-        # Extract posts from THIS profile page
         posts = _extract_posts_from_profile_html(current_html, current_url, username)
         
         new_posts = _add_new_posts(posts, seen_hashes, all_data)
@@ -316,7 +308,6 @@ def _crawl_user_profile(base_url, username, max_pages, visited, seen_hashes, all
         if new_posts == 0 and pages_crawled > 1:
             break
         
-        # Follow pagination
         next_url = _find_next_page(current_html, current_url, allowed_domain)
         if not next_url or next_url in visited:
             break
@@ -331,7 +322,6 @@ def _crawl_user_profile(base_url, username, max_pages, visited, seen_hashes, all
         current_url = next_url
         time.sleep(random.uniform(3, 6))
     
-    # Bug Fix 1: Return HTML so Phase 2 doesn't have to re-fetch
     return all_data, profile_url, profile_html
 
 
@@ -346,7 +336,6 @@ def _extract_posts_from_profile_html(html, url, target_username):
     posts = []
     seen_texts = set()
     
-    # Check for known profile schema first
     profile_schema = get_profile_schema_for_url(url)
     if profile_schema:
         posts.extend(_extract_posts_from_selectors(
@@ -354,7 +343,6 @@ def _extract_posts_from_profile_html(html, url, target_username):
             url, target_username, seen_texts, schema=profile_schema
         ))
     
-    # If no profile schema, try the general thread schema
     if not posts:
         schema = get_schema_for_url(url)
         if schema:
@@ -364,10 +352,8 @@ def _extract_posts_from_profile_html(html, url, target_username):
             ))
     
     if not posts:
-        # Strategy 1: Look for common container blocks
         containers = soup.select("div.message-container, div.post-container, article.post, div.postTop, div.post-inner")
         if not containers:
-            # Broader search
             containers = soup.find_all(["div", "article"], class_=re.compile(
                 r"message-container|post-container|post-listing|comment-node|postTop|post-inner|postbit", re.I
             ))
@@ -378,15 +364,12 @@ def _extract_posts_from_profile_html(html, url, target_username):
                 seen_texts.add(post["post"])
                 posts.append(post)
     
-    # Strategy 2: Find all links that look like thread titles
     if not posts:
         posts = _extract_from_title_links(soup, url, target_username, seen_texts)
     
-    # Strategy 3: Find all content blocks near the username
     if not posts:
         posts = _extract_from_text_blocks(soup, url, target_username, seen_texts)
         
-    # AI Fallback: If all heuristics fail, ask Gemini to find the schema
     if not posts:
         print(f"  [!] Heuristics failed to find posts on profile page. Asking AI for help...")
         try:
@@ -478,14 +461,12 @@ def _extract_post_content_body(clone, schema=None):
 def _parse_single_post_container(container, url, target_username, schema=None):
     """Parse a single post container from a profile or thread page."""
     
-    # Clone to strip noise before text extraction
     clone = BeautifulSoup(str(container), "html.parser")
     _strip_noise_elements(clone)
         
     title = _extract_post_title(clone)
     content = _extract_post_content_body(clone, schema)
     
-    # Combine title + content
     full_text = ""
     if title and content:
         full_text = f"{title}\n{content}"
@@ -497,7 +478,6 @@ def _parse_single_post_container(container, url, target_username, schema=None):
     if not full_text or len(full_text.split()) < 3:
         return None
     
-    # Find timestamp
     timestamp = "N/A"
     if schema and schema.get("timestamp_selector"):
         for sel in schema["timestamp_selector"].split(","):
@@ -529,11 +509,9 @@ def _extract_from_title_links(soup, url, target_username, seen_texts):
         href = a.get("href", "")
         text = a.get_text(strip=True)
         
-        # Must look like a thread link (added Dread /d/ pattern)
         if not re.search(r"/post/|/thread/|/topic/|/comments/|/d/[\w\-]+/", href):
             continue
         
-        # Must have substantive text (a real title)
         if not text or len(text.split()) < 2 or len(text) < 5:
             continue
         
@@ -544,7 +522,6 @@ def _extract_from_title_links(soup, url, target_username, seen_texts):
             continue
         seen_texts.add(text)
         
-        # Look for nearby content
         content = ""
         parent = a.parent
         if parent:
@@ -554,7 +531,6 @@ def _extract_from_title_links(soup, url, target_username, seen_texts):
         
         full_text = f"{text}\n{content}" if content else text
         
-        # Find timestamp
         timestamp = "N/A"
         for sibling in (a.parent or soup).find_all(True, class_=re.compile(r"date|time|ago", re.I)):
             ts = sibling.get_text(strip=True)
@@ -588,7 +564,7 @@ def _extract_from_text_blocks(soup, url, target_username, seen_texts):
             continue
         
         text = el.get_text(strip=True)
-        if not text or len(text.split()) < 5:
+        if not is_substantial_post(text):
             continue
         if len(text) > 3000:
             continue
@@ -628,10 +604,6 @@ def _clean_profile_post_text(text, username):
     return text.strip()
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Phase 2: Follow thread links to get full content + replies
-# ═══════════════════════════════════════════════════════════════════
-
 def _fetch_and_combine_thread_posts(thread_url, username):
     """Fetch a thread page and return all posts by the target user.
     
@@ -641,19 +613,16 @@ def _fetch_and_combine_thread_posts(thread_url, username):
     if not thread_html:
         return [], thread_html
     
-    # Method A: Use the parser pipeline
     parser_posts = []
     try:
         parser_posts = extract_thread_data(thread_html, thread_url)
     except LLMQuotaExceeded:
         raise
     except Exception as e:
-        print(f"    [-] Parser error: {e}")
+        log_failure("Parser error in user thread", e, level=logging.ERROR, logger_name="user_crawler", url=thread_url)
     
-    # Filter parser results by username
     matched = _filter_by_username(parser_posts, username)
     
-    # Method B: Raw HTML extraction
     raw_posts = _extract_user_posts_from_thread_html(thread_html, thread_url, username)
     
     return matched + raw_posts, thread_html
@@ -672,17 +641,18 @@ def _add_new_posts(posts, seen_hashes, all_data):
             seen_hashes.add(ph)
             all_data.append(post)
             new_count += 1
+    if new_count > 0:
+        notify_posts_found(new_count)
     return new_count
 
 
 def _crawl_user_threads(base_url, username, max_pages, visited, seen_hashes, allowed_domain, profile_url=None, profile_html=None):
     """Visit threads linked from the profile page and extract the user's posts.
     
-    Bug Fix 1: Takes profile_url and profile_html as args to avoid re-fetching.
+    Takes profile_url and profile_html as args to avoid re-fetching.
     """
     all_data = []
     
-    # If no cached HTML, we must fetch it
     if not profile_html:
         if not profile_url:
             profile_url = base_url + f"/u/{username}"
@@ -690,7 +660,6 @@ def _crawl_user_threads(base_url, username, max_pages, visited, seen_hashes, all
         if not profile_html:
             return all_data
     
-    # Extract thread links from the profile HTML
     thread_links = _extract_thread_links_from_profile(profile_html, profile_url, allowed_domain)
     
     if not thread_links:
@@ -735,7 +704,6 @@ def _extract_user_posts_from_thread_html(html, url, target_username):
     
     schema = get_schema_for_url(url)
     
-    # Bug Fix 5: Find user links by both href AND text
     user_links = []
     for a in soup.find_all("a", href=True):
         href = a.get("href", "").lower()
@@ -785,7 +753,6 @@ def _find_post_container(element):
         classes = " ".join(parent.get("class", [])).lower()
         tag = parent.name or ""
         
-        # Bug Fix 6: Universal container finder (added posttop, post-inner, etc.)
         if any(c in classes for c in [
             "message-container", "post-container", "comment-node",
             "post", "message", "comment", "reply", "entry",
@@ -841,10 +808,6 @@ def _extract_content_from_container(container, schema=None):
     return text.strip()
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Phase 3: Fallback — scan general forum threads
-# ═══════════════════════════════════════════════════════════════════
-
 def _crawl_threads_for_user(forum_url, username, max_pages, visited, seen_hashes, allowed_domain):
     """Fallback: crawl forum threads and filter for posts by the target user."""
     from app.crawler.link_extractor import extract_thread_links
@@ -880,10 +843,6 @@ def _crawl_threads_for_user(forum_url, username, max_pages, visited, seen_hashes
     return all_data
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Helpers
-# ═══════════════════════════════════════════════════════════════════
-
 def _resolve_href(href, page_url):
     """Resolve a raw href attribute to an absolute URL."""
     if href.startswith("/"):
@@ -899,12 +858,11 @@ def _extract_thread_links_from_profile(html, profile_url, allowed_domain):
     links = []
     seen = set()
     
-    # Bug Fix 4: Fix thread link regex for Dread + add universal patterns
     thread_patterns = [
         re.compile(r"/post/[a-zA-Z0-9]+"),
         re.compile(r"/thread/[a-zA-Z0-9]+"),
         re.compile(r"/topic/[a-zA-Z0-9]+"),
-        re.compile(r"/d/[\w\-]+/[\w\-]+"), # Dread thread link
+        re.compile(r"/d/[\w\-]+/[\w\-]+"),  # Dread thread link
         re.compile(r"/d/[^/]+/[^/?#]+"),
         re.compile(r"/comments/[a-zA-Z0-9]+"),
         re.compile(r"/viewtopic\.php"),
@@ -919,7 +877,6 @@ def _extract_thread_links_from_profile(html, profile_url, allowed_domain):
         
         path = urlparse(href).path
         
-        # Skip profile/user/navigation links (make sure not to skip valid threads)
         if re.match(r"^/(u|user|profile|members?|users|search|login|register|settings|c|communities)(/|$)", path, re.I):
             continue
         
@@ -935,14 +892,12 @@ def _is_profile_page(html, username):
     if not html:
         return False
     
-    # Bug Fix 2: Increase lookup area for huge pages
     lower = html[:25000].lower()
     username_lower = username.lower()
     
     if username_lower not in lower:
         return False
     
-    # Bug Fix 2: Add Dread-specific and broader indicators
     indicators = [
         f"/u/{username_lower}", f"/user/{username_lower}", f"@{username_lower}",
         "profile", "user activity", "post history", "posts by",

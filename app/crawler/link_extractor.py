@@ -2,7 +2,6 @@ from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urljoin
 import re
 
-# Thread Detectors
 
 def is_thread_link(link, base_url):
     """
@@ -14,7 +13,7 @@ def is_thread_link(link, base_url):
         "/thread/", "/threads/", "/topic/", "/topics/",
         "/viewtopic", "/showthread", "/post/", "/t/",
         "/discussion/", "/forum/", "?tid=", "?t=",
-        "/comments/",  # Reddit-style
+        "/comments/",
     ]
 
     skip_indicators = [
@@ -26,17 +25,13 @@ def is_thread_link(link, base_url):
 
     link_lower = link.lower()
 
-    # Skip navigation links
     for skip in skip_indicators:
         if skip in link_lower:
             return False
 
-    # Check if it looks like a thread
     for indicator in thread_indicators:
         if indicator in link_lower:
             return True
-
-    # Heuristic: same domain, has path with ID-like segment
 
     parsed = urlparse(link)
     base_parsed = urlparse(base_url)
@@ -44,7 +39,6 @@ def is_thread_link(link, base_url):
     if parsed.netloc != base_parsed.netloc:
         return False
 
-    # Path has a numeric ID → likely a thread
     if re.search(r'/\d+', parsed.path):
         return True
 
@@ -63,7 +57,6 @@ def extract_thread_links(html, base_url):
     for a in soup.find_all("a", href=True):
         href = urljoin(base_url, a["href"])
 
-        # Only keep same-domain thread links
         if urlparse(href).netloc == base_domain:
             if is_thread_link(href, base_url):
                 if href not in thread_links:

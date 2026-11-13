@@ -1,6 +1,5 @@
 import requests
 
-# Try both localhost and the user's provided IP
 PROXY_OPTIONS = [
     "socks5h://127.0.0.1:9050",
     "socks5h://192.168.1.40:9050"

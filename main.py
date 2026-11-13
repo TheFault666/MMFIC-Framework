@@ -1,35 +1,41 @@
-from app.crawler.browser_fetcher import check_tor, renew_tor_circuit
-from app.crawler.crawler import crawl
-from app.crawler.user_crawler import crawl_user
-from app.crawler.crawl_utils import sanitize_filename, filter_substantial_posts, append_to_json_file
-from app.parser.date_utils import normalize_timestamps
+import argparse
+from contextlib import closing
 import json
 import os
+import sys
 
-from app.database import init_db, save_posts
+from app.crawler.browser_fetcher import close_browser, ensure_tor_safety, TorOPSECError
+from app.crawler.crawler import crawl
+from app.crawler.user_crawler import crawl_user
+from app.crawler.crawl_utils import sanitize_filename, filter_substantial_posts, persist_crawl_results
+from app.diagnostics import add_verbosity_args, configure_logging
+from app.database import init_db
 
 
 def _persist_crawl_results(data, filename="crawl_data.json"):
-    """Append data to a JSON file and save to database."""
+    """Normalize timestamps, save to SQLite, and append to JSON."""
     if not data:
         print("No Data Logged!")
         return
 
-    data = normalize_timestamps(data)
-
-    all_data = append_to_json_file(data, filename)
+    normalized, all_data = persist_crawl_results(data, json_filepath=filename)
     print(f"Data saved to {filename} (Total records: {len(all_data)})")
-
-    # Sync to database
-    save_posts(data)
-    print(f"[+] Saved {len(data)} posts to database.")
+    print(f"[+] Saved {len(normalized)} posts to database.")
 
     return all_data
 
 
 def run_general_crawl():
     """Mode 1: General forum crawl (original behavior)."""
-    url = input("\nEnter URL to crawl: ")
+    url = input("\nEnter URL to crawl: ").strip()
+    if not url:
+        return []
+
+    try:
+        ensure_tor_safety(url)
+    except TorOPSECError as e:
+        print(f"\n[CRITICAL OPSEC ERROR] {e}")
+        return []
 
     print("\n=== Crawling ===")
     data = crawl(url, 5)
@@ -59,7 +65,7 @@ def _prompt_username_from_url(url_input):
         print(f"  [+] Auto-detected username: {detected_user}")
         confirm = input(f"  Use '{detected_user}' as target? (Y/n): ").strip().lower()
         username = detected_user if confirm not in ("n", "no") else input("  Enter target username: ").strip()
-        forum_url = url_input  # Pass the full profile URL — crawl_user handles it
+        forum_url = url_input
     else:
         forum_url = url_input
         username = input("Enter target username: ").strip()
@@ -83,6 +89,15 @@ def run_user_crawl():
     print("    - A forum base URL + username separately")
 
     url_input = input("\nEnter URL: ").strip()
+    if not url_input:
+        return []
+
+    try:
+        ensure_tor_safety(url_input)
+    except TorOPSECError as e:
+        print(f"\n[CRITICAL OPSEC ERROR] {e}")
+        return []
+
     forum_url, username = _prompt_username_from_url(url_input)
     max_pages = _prompt_max_pages()
 
@@ -90,12 +105,10 @@ def run_user_crawl():
     data = crawl_user(forum_url, username, max_pages)
 
     if data:
-        # Save to user-specific file
         safe_name = sanitize_filename(username)
         user_file = f"user_data_{safe_name}.json"
         _persist_crawl_results(data, user_file)
 
-        # Also save to main crawl_data.json for the ML pipeline
         _persist_crawl_results(data, "crawl_data.json")
 
         print(f"\nCollected {len(data)} posts by '{username}'")
@@ -113,17 +126,16 @@ def _fetch_db_users():
         from app.database import DB_PATH
         import sqlite3
 
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("""
-            SELECT username, forum, COUNT(*) as post_count
-            FROM posts
-            WHERE username != 'unknown' AND content IS NOT NULL
-            GROUP BY username, forum
-            ORDER BY forum, username
-        """)
-        rows = c.fetchall()
-        conn.close()
+        with closing(sqlite3.connect(DB_PATH)) as conn:
+            c = conn.cursor()
+            c.execute("""
+                SELECT username, forum, COUNT(*) as post_count
+                FROM posts
+                WHERE username != 'unknown' AND content IS NOT NULL
+                GROUP BY username, forum
+                ORDER BY forum, username
+            """)
+            rows = c.fetchall()
 
         return rows
     except Exception as e:
@@ -178,12 +190,10 @@ def _load_or_train_model():
 
 
 def _interpret_score(score):
-    """Return a human-readable label for a similarity score."""
-    if score > 0.7:
-        return "LIKELY SAME PERSON", "[+]"
-    if score > 0.4:
-        return "UNCERTAIN", "[?]"
-    return "LIKELY DIFFERENT", "[-]"
+    """Return a human-readable label and icon using canonical thresholds."""
+    from Model.thresholds import interpret_similarity
+    _, label, icon = interpret_similarity(score)
+    return label, icon
 
 
 def _ensure_fingerprint(uname, uforum):
@@ -207,16 +217,29 @@ def _ensure_fingerprint(uname, uforum):
 def _compute_similarity_score(fp_a, fp_b, model):
     """Return a float similarity score for two fingerprints."""
     import numpy as np
-    diff = np.abs(fp_a["fingerprint"] - fp_b["fingerprint"]).reshape(1, -1)
+    from Model.features import CANONICAL_FEATURE_DIM
+
+    arr_a = fp_a["fingerprint"] if isinstance(fp_a, dict) else fp_a
+    arr_b = fp_b["fingerprint"] if isinstance(fp_b, dict) else fp_b
+
+    if arr_a.shape != arr_b.shape:
+        raise ValueError(f"Fingerprint shape mismatch: {arr_a.shape} vs {arr_b.shape}")
+
+    expected_dim = getattr(getattr(model, 'classifier', None), 'n_features_in_', 
+                           getattr(getattr(model, 'scaler', None), 'n_features_in_', CANONICAL_FEATURE_DIM))
+    if arr_a.shape != (expected_dim,):
+        raise ValueError(f"Fingerprint dimension mismatch: expected ({expected_dim},), got {arr_a.shape}")
+
+    diff = np.abs(arr_a - arr_b).reshape(1, -1)
     diff = np.nan_to_num(diff, nan=0.0, posinf=0.0, neginf=0.0)
 
-    if model and model.is_trained:
+    if model and getattr(model, 'is_trained', False):
         return model.predict_pair(diff)
 
     from sklearn.metrics.pairwise import cosine_similarity
     return float(cosine_similarity(
-        fp_a["fingerprint"].reshape(1, -1),
-        fp_b["fingerprint"].reshape(1, -1)
+        arr_a.reshape(1, -1),
+        arr_b.reshape(1, -1)
     )[0][0])
 
 
@@ -492,14 +515,52 @@ def _print_main_menu():
     print()
 
 
+def _verify_startup_tor():
+    """Verify Tor is active if enabled, prompting the user if unavailable."""
+    import app.crawler.browser_fetcher as bf
+    
+    if not bf.USE_TOR:
+        print("\n[!] OPSEC NOTICE: USE_TOR is False (Clearnet Mode).")
+        print("    All crawls will expose your real IP address.")
+        print("    Hidden services (.onion) cannot be crawled in this mode.\n")
+        return
+
+    print("=== Checking Tor Connection ===")
+    if bf.check_tor():
+        print("\n=== Provisioning Fresh Tor Circuit ===")
+        bf.renew_tor_circuit()
+        return
+
+    while True:
+        print("\n" + "!" * 60)
+        print("CRITICAL OPSEC WARNING: Tor connection check failed!")
+        print("Tor is not reachable via SOCKS5 proxy on 127.0.0.1:9150.")
+        print("!" * 60)
+        print("  [R] Retry Tor connection")
+        print("  [D] Disable Tor for this session (DANGER: Exposes Real IP)")
+        print("  [Q] Quit application to maintain OPSEC")
+        ans = input("\nSelect option (R/D/Q): ").strip().lower()
+
+        if ans in ("r", "retry", ""):
+            if bf.check_tor(force=True):
+                print("[+] Tor connection restored!")
+                bf.renew_tor_circuit()
+                return
+            print("[-] Tor check failed again.")
+        elif ans in ("d", "disable"):
+            bf.USE_TOR = False
+            print("[!] Tor disabled for this session. Running in Clearnet mode.")
+            print("[!] Note: .onion hidden services will be blocked to prevent DNS leaks.\n")
+            return
+        elif ans in ("q", "quit", "exit"):
+            print("[*] Exiting to maintain OPSEC.")
+            sys.exit(0)
+
+
 def main_menu():
-    # Initialize database
     init_db()
 
-    print("=== Checking Tor ===")
-    if check_tor():
-        print("\n=== Getting fresh Tor identity ===")
-        renew_tor_circuit()
+    _verify_startup_tor()
 
     _print_main_menu()
     choice = input("Select mode (1/2/3): ").strip()
@@ -515,13 +576,20 @@ def main_menu():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Trowler MMFIC OSINT CLI")
+    add_verbosity_args(parser)
+    cli_args = parser.parse_args()
+    configure_logging(verbose=cli_args.verbose, debug=cli_args.debug)
+
     try:
         main_menu()
+    except KeyboardInterrupt:
+        print("\n[*] Interrupted by user.")
     except Exception as e:
         print(f"\n{'!'*60}")
         print(f"CRITICAL ERROR: {e}")
         import traceback
         traceback.print_exc()
-        from app.crawler.browser_fetcher import close_browser
-        close_browser()
         input("\nPress Enter to exit...")
+    finally:
+        close_browser()

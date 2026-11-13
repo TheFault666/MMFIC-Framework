@@ -15,31 +15,22 @@ darkweb forums.
 """
 
 import re
-from urllib.parse import urlparse
 
 
-# ── Username Validation ──────────────────────────────────────────
-
-# UI words that should NEVER be a username (case-insensitive)
 _UI_WORDS = {
-    # Navigation & actions
     "back", "next", "previous", "reply", "quote", "report", "share",
     "permalink", "edit", "delete", "save", "cancel", "submit", "close",
     "search", "home", "top", "new", "old", "hot", "best", "rising",
-    
-    # Auth & account
+
     "login", "log in", "register", "sign up", "sign in", "logout",
     "log out", "sign out", "forgot", "password", "username",
-    
-    # Section headers
+
     "comments", "posts", "replies", "threads", "topics", "messages",
     "members", "users", "online", "offline", "staff", "moderators",
     "administrators", "admin", "rules", "wiki", "about", "info",
-    
-    # Forum/site names that appear as UI elements
+
     "community", "forum", "board", "discussion", "general",
-    
-    # Common English words that parsers misidentify as usernames
+
     "the", "and", "for", "are", "but", "not", "you", "all", "can",
     "had", "her", "was", "one", "our", "out", "has", "his", "how",
     "its", "may", "who", "did", "get", "let", "say", "she", "too",
@@ -50,25 +41,23 @@ _UI_WORDS = {
     "step", "cards", "card", "link", "view", "more", "free",
     "sell", "buy", "need", "want", "help", "send", "text",
     "individual", "method",
-    
-    # Misc UI
+
     "unknown", "anonymous", "guest", "n/a", "none", "null",
     "undefined", "deleted", "removed", "banned", "suspended",
     "sort by", "view all", "show more", "load more", "see more",
     "advertise here", "join community", "leave community",
 }
 
-# Regex patterns for invalid usernames
 _INVALID_USERNAME_PATTERNS = [
-    re.compile(r"^\d+$"),                          # Pure numbers: "1", "47", "0"
-    re.compile(r"^(comments|posts|replies)\d*$", re.I),  # "Comments14", "Posts3"
-    re.compile(r"^(karma|points?|votes?)\d*$", re.I),    # "karma", "Points5"
-    re.compile(r"^@[\w.]+$"),                       # @ fragments: "@gmail", "@draga"
-    re.compile(r"^\d+\s*(hours?|minutes?|days?|weeks?|months?|years?)\s*ago$", re.I),  # "4 hours ago"
-    re.compile(r"^(joined|created|posted)\b", re.I),     # "Joined 3 days ago"
-    re.compile(r"^\d+\s*k?\s*members?$", re.I),          # "1.5k Members"
-    re.compile(r"^sort\s+by", re.I),                     # "Sort by"
-    re.compile(r"^[A-Z]{2,}$"),                     # All-caps short words: "NEWS", "OTHER"
+    re.compile(r"^\d+$"),
+    re.compile(r"^(comments|posts|replies)\d*$", re.I),
+    re.compile(r"^(karma|points?|votes?)\d*$", re.I),
+    re.compile(r"^@[\w.]+$"),
+    re.compile(r"^\d+\s*(hours?|minutes?|days?|weeks?|months?|years?)\s*ago$", re.I),
+    re.compile(r"^(joined|created|posted)\b", re.I),
+    re.compile(r"^\d+\s*k?\s*members?$", re.I),
+    re.compile(r"^sort\s+by", re.I),
+    re.compile(r"^[A-Z]{2,}$"),
 ]
 
 
@@ -113,17 +102,10 @@ def _is_valid_username(username):
     return True
 
 
-# ── Username Extraction from Text ────────────────────────────────
-
-# Universal patterns that contain usernames embedded in text
 _USERNAME_TEXT_PATTERNS = [
-    # Reddit/Lemmy/Kbin style: /u/username or u/username
     re.compile(r"(?:^|[/\s])u/([A-Za-z0-9_\-]{2,30})(?:\s|$|[^A-Za-z0-9_\-])"),
-    # @mention style: @username
     re.compile(r"(?:^|\s)@([A-Za-z0-9_\-]{2,30})(?:\s|$|[^A-Za-z0-9_\-])"),
-    # "by username" or "posted by username"
     re.compile(r"(?:posted\s+)?by\s+([A-Za-z0-9_\-]{2,30})(?:\s|$)", re.I),
-    # "Author: username"
     re.compile(r"author:\s*([A-Za-z0-9_\-]{2,30})(?:\s|$)", re.I),
 ]
 
@@ -137,7 +119,6 @@ def _extract_username_from_text(text):
     if not text:
         return None
     
-    # Only search the first 300 chars (username appears near the top)
     search_text = text[:300]
     
     for pattern in _USERNAME_TEXT_PATTERNS:
@@ -170,58 +151,38 @@ def _clean_username(username):
     return clean_username_trailing_digits(username)
 
 
-# ── Post Content Cleaning ────────────────────────────────────────
-
-# Universal noise patterns found in forum page dumps
 _NOISE_STRIP_PATTERNS = [
-    # Profile metadata blocks (karma + joined + posts + comments)
     re.compile(
         r"\d+\s*karma\s*(?:Joined\s*\d+\s*(?:hours?|days?|weeks?|months?|years?)\s*ago\s*)?"
         r"(?:Posts?\s*\d+\s*)?(?:Comments?\s*\d+\s*)?",
         re.I
     ),
-    # "Joined X ago" standalone
     re.compile(r"Joined\s*\d+\s*(?:hours?|days?|weeks?|months?|years?)\s*ago", re.I),
-    # Timestamp prefixes in concatenated text: "4 hours ago" before titles
     re.compile(r"^\d+\s*(?:hours?|days?|weeks?|months?|years?)\s*ago", re.I),
-    # CTA blocks
     re.compile(r"Do you want to leave a comment\?\s*Log\s*in\s*or\s*Register\s*(?:Log\s*in\s*Register\s*)?", re.I),
     re.compile(r"Log\s*in\s*or\s*Register\s*Log\s*in\s*Register", re.I),
-    # Comment section headers
     re.compile(r"Sort\s*by:\s*(?:Top\s*)*(?:New\s*)?(?:Old\s*)?", re.I),
     re.compile(r"No comments yet\.\s*Be the first to comment!", re.I),
-    # Sidebar community blocks
     re.compile(
         r"(?:About\s+Community\s*)?(?:GENERAL|TECHNOLOGY|ENTERTAINMENT|NEWS|OTHER|MARKETPLACE)\s*"
         r"[\w\s]+c/\w+.*?(?:Join\s*community|Created)",
         re.I | re.DOTALL
     ),
     re.compile(r"\d+\.?\d*k?\s*Members\s*\d+\s*Posts?\s*\d+\s*(?:weeks?|months?|days?)\s*ago\s*Created", re.I),
-    # Staff/moderator blocks
     re.compile(r"Staff\s*members\s*(?:Staff members are hidden by community settings\.?|Community\s*manager.*)", re.I | re.DOTALL),
-    # Advertise
     re.compile(r"Advertise\s*here\s*View\s*all", re.I),
-    # Navigation
     re.compile(r"^Back\s*", re.I),
-    # Vote/action buttons text
     re.compile(r"Reply\s*$", re.I),
-    # Inline Reply artifacts between comments
     re.compile(r"Reply(?=[A-Z])"),
-    # u/username patterns (remove the /u/ prefix notation from post text)
     re.compile(r"/u/[A-Za-z0-9_\-]+"),
-    # Suspected Scammer/badges
     re.compile(r"Suspected\s+Scammer", re.I),
-    # "× close" button artifacts
     re.compile(r"×\s*\d*"),
     # "P" badge artifact (e.g., "darkdotwebP")
     re.compile(r"(?<=[a-z])P(?=/u/)", re.I),
-    
-    # ── Dread Specific Artifacts ──
-    # User metadata block: "P 5,515 points Posts 320 Comments 17,012"
+
+    # Dread user/post metadata and footer action artifacts
     re.compile(r"(?:P\s+)?(?:-?\d+,?\d*)\s+points\s+Posts\s+(?:\d+,?\d*)\s+Comments\s+(?:\d+,?\d*)", re.I),
-    # Post metadata block: "1 points 8 hours ago" or "1 points 2 days ago"
     re.compile(r"-?\d+\s+points?\s+\d+\s+(?:hours?|days?|weeks?|months?|years?)\s+ago", re.I),
-    # Footer action buttons: "Reply Permalink Submit Formatting options..."
     re.compile(r"Reply\s+Permalink\s+Submit\s+Formatting\s+options\.\.\.", re.I),
 ]
 
@@ -260,8 +221,6 @@ def _clean_post_content(text):
     
     return cleaned
 
-
-# ── Deduplication ────────────────────────────────────────────────
 
 def _is_substring_of_kept(post_text, kept):
     """Check if post_text is a substring of (or contains) any kept post text."""
@@ -331,8 +290,6 @@ def _deduplicate_posts(posts):
     return result
 
 
-# ── Entry-validation helpers ─────────────────────────────────────
-
 def _resolve_username(username, post_text):
     """Return a validated, cleaned username, falling back to text extraction."""
     if not _is_valid_username(username):
@@ -355,8 +312,6 @@ def _build_clean_entry(post, username, post_text):
 def is_post_too_short(post_text):
     return len(post_text.split()) < 3 and "http" not in post_text and ".onion" not in post_text
 
-
-# ── Main Pipeline ────────────────────────────────────────────────
 
 def post_process(posts):
     """Universal post-processing pipeline.

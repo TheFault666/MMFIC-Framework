@@ -10,6 +10,7 @@ Same-user halves become positive pairs, cross-user halves become negative pairs.
 This lets us train WITHOUT manual labeling.
 """
 
+from contextlib import closing
 import json
 import os
 import random
@@ -20,7 +21,12 @@ from urllib.parse import urlparse
 from sklearn.decomposition import LatentDirichletAllocation
 from sklearn.feature_extraction.text import CountVectorizer
 
-from .features import extract_user_features
+from app.crawler.crawl_utils import is_substantial_post
+from app.diagnostics import sanitize_finite_array
+from .features import (
+    extract_user_features, CANONICAL_FEATURE_DIM,
+    CANONICAL_BOARD_SLOTS, CANONICAL_LDA_TOPICS, parse_timestamp_epoch
+)
 
 
 def _extract_domain_from_source(source):
@@ -34,7 +40,7 @@ def _parse_entry_to_profile(entry, profiles):
     if user == "unknown":
         return
     post = entry.get("post", "")
-    if len(post.split()) < 5:
+    if not is_substantial_post(post):
         return
     source = entry.get("source", "manual")
     domain = _extract_domain_from_source(source)
@@ -73,29 +79,52 @@ def load_crawl_data(filepath="crawl_data.json"):
     return filtered
 
 
+def _unpack_half(items):
+    if not items:
+        return [], [], []
+    posts_h, ts_h, src_h = zip(*items)
+    return list(posts_h), list(ts_h), list(src_h)
+
+
 def _split_posts(posts, timestamps=None, sources=None):
-    """Split a user's posts into two halves for self-pairing.
-    
-    Shuffles first to avoid temporal bias (e.g. user changes style over time).
+    """Split a user's posts chronologically at the median for self-pairing.
+
+    Preserves temporal era separation so the classifier captures realistic
+    cross-time behavioral/stylometric drift and circadian timeprint consistency.
+    Falls back to seeded random shuffling when timestamps are missing or lack
+    distinct chronological ordering.
     """
-    timestamps = timestamps or ["N/A"] * len(posts)
-    sources = sources or ["manual"] * len(posts)
-    
+    n = len(posts)
+    timestamps = list(timestamps) if timestamps is not None and len(timestamps) == n else ["N/A"] * n
+    sources = list(sources) if sources is not None and len(sources) == n else ["manual"] * n
+
     combined = list(zip(posts, timestamps, sources))
-    random.shuffle(combined)
-    
-    mid = len(combined) // 2
-    half_a = combined[:mid]
-    half_b = combined[mid:]
-    
-    posts_a = [p for p, t, s in half_a]
-    posts_b = [p for p, t, s in half_b]
-    ts_a = [t for p, t, s in half_a]
-    ts_b = [t for p, t, s in half_b]
-    src_a = [s for p, t, s in half_a]
-    src_b = [s for p, t, s in half_b]
-    
-    return (posts_a, ts_a, src_a), (posts_b, ts_b, src_b)
+    dated = []
+    undated = []
+    for idx, item in enumerate(combined):
+        epoch = parse_timestamp_epoch(item[1])
+        if epoch is not None:
+            dated.append((epoch, idx, item))
+        else:
+            undated.append(item)
+
+    distinct_epochs = {entry[0] for entry in dated}
+    # Require >=2 distinct dated posts covering at least half the profile; otherwise shuffle.
+    if n >= 2 and len(dated) >= max(2, (n + 1) // 2) and len(distinct_epochs) >= 2:
+        dated.sort(key=lambda entry: (entry[0], entry[1]))
+        dated_items = [entry[2] for entry in dated]
+        mid_dated = len(dated_items) // 2
+        half_a = dated_items[:mid_dated]
+        half_b = dated_items[mid_dated:]
+        for u_idx, item in enumerate(undated):
+            (half_a if u_idx % 2 == 0 else half_b).append(item)
+    else:
+        random.shuffle(combined)
+        mid = n // 2
+        half_a = combined[:mid]
+        half_b = combined[mid:]
+
+    return _unpack_half(half_a), _unpack_half(half_b)
 
 
 def _extract_board_from_source(src):
@@ -104,8 +133,8 @@ def _extract_board_from_source(src):
     return parts[0] if parts else None
 
 
-def _fit_lda_and_board_vocab(eligible_users, profiles, lda_topics, seed):
-    """Fit LDA topic model and build top-10 board vocabulary from all eligible posts."""
+def _fit_lda_and_board_vocab(eligible_users, profiles, lda_topics=CANONICAL_LDA_TOPICS, seed=42):
+    """Fit LDA topic model and build top board vocabulary from all eligible posts."""
     all_posts = []
     all_boards = []
     for user in eligible_users:
@@ -116,12 +145,13 @@ def _fit_lda_and_board_vocab(eligible_users, profiles, lda_topics, seed):
                 if board:
                     all_boards.append(board)
                     
+    n_topics = lda_topics if (lda_topics and lda_topics > 0) else CANONICAL_LDA_TOPICS
     lda_vectorizer = CountVectorizer(max_features=5000, stop_words="english")
     X_text = lda_vectorizer.fit_transform(all_posts)
-    lda_model = LatentDirichletAllocation(n_components=lda_topics, random_state=seed)
+    lda_model = LatentDirichletAllocation(n_components=n_topics, random_state=seed)
     lda_model.fit(X_text)
     
-    board_vocab = [b for b, c in Counter(all_boards).most_common(10)]
+    board_vocab = [b for b, c in Counter(all_boards).most_common(CANONICAL_BOARD_SLOTS)]
     
     return lda_model, lda_vectorizer, board_vocab
 
@@ -194,7 +224,7 @@ def _build_negative_pairs(user_halves, n_positive, neg_ratio):
     return X_pairs, y_labels, pair_info
 
 
-def prepare_training_pairs(profiles, neg_ratio=3, min_posts_per_half=1, seed=42, lda_topics=20):
+def prepare_training_pairs(profiles, neg_ratio=3, min_posts_per_half=1, seed=42, lda_topics=CANONICAL_LDA_TOPICS):
     """Generate labeled training pairs from user profiles.
     
     Strategy (no manual labeling needed):
@@ -207,10 +237,10 @@ def prepare_training_pairs(profiles, neg_ratio=3, min_posts_per_half=1, seed=42,
         neg_ratio: how many negative pairs per positive pair
         min_posts_per_half: minimum posts required in each half
         seed: random seed for reproducibility
-        lda_topics: number of topics for LDA modeling
+        lda_topics: number of topics for LDA modeling (default: CANONICAL_LDA_TOPICS)
     
     Returns:
-        X: numpy array of shape (n_pairs, n_features) — absolute feature differences
+        X: numpy array of shape (n_pairs, CANONICAL_FEATURE_DIM) — absolute feature differences
         y: numpy array of shape (n_pairs,) — 1=same person, 0=different
         pair_info: list of (user_a, user_b) tuples for debugging
         lda_model: fitted LatentDirichletAllocation model
@@ -249,8 +279,13 @@ def prepare_training_pairs(profiles, neg_ratio=3, min_posts_per_half=1, seed=42,
     
     X = np.array(X_pairs, dtype=np.float64)
     y = np.array(y_labels, dtype=np.int32)
+
+    X = sanitize_finite_array(X, context="prepare_training_pairs")
     
-    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+    if X.size > 0:
+        assert X.shape[1] == CANONICAL_FEATURE_DIM, (
+            f"Training feature dimension mismatch: expected {CANONICAL_FEATURE_DIM}, got {X.shape[1]}"
+        )
     
     return X, y, pair_info, lda_model, lda_vectorizer, board_vocab
 
@@ -265,15 +300,26 @@ def prepare_prediction_pair(posts_a, posts_b, timestamps_a=None, timestamps_b=No
         posts_b: list of posts from user B
     
     Returns:
-        numpy array of shape (1, n_features) — ready for model.predict()
+        numpy array of shape (1, CANONICAL_FEATURE_DIM) — ready for model.predict()
     """
     feat_a = extract_user_features(posts_a, timestamps_a, sources_a, lda_model, lda_vectorizer, board_vocab)
     feat_b = extract_user_features(posts_b, timestamps_b, sources_b, lda_model, lda_vectorizer, board_vocab)
     
-    diff = np.abs(feat_a - feat_b)
-    diff = np.nan_to_num(diff, nan=0.0, posinf=0.0, neginf=0.0)
+    assert feat_a.shape == (CANONICAL_FEATURE_DIM,), (
+        f"Feature vector A dimension mismatch: expected ({CANONICAL_FEATURE_DIM},), got {feat_a.shape}"
+    )
+    assert feat_b.shape == (CANONICAL_FEATURE_DIM,), (
+        f"Feature vector B dimension mismatch: expected ({CANONICAL_FEATURE_DIM},), got {feat_b.shape}"
+    )
     
-    return diff.reshape(1, -1)
+    diff = np.abs(feat_a - feat_b)
+    diff = sanitize_finite_array(diff, context="prepare_prediction_pair")
+    
+    diff_2d = diff.reshape(1, -1)
+    assert diff_2d.shape == (1, CANONICAL_FEATURE_DIM), (
+        f"Pair difference vector dimension mismatch: expected (1, {CANONICAL_FEATURE_DIM}), got {diff_2d.shape}"
+    )
+    return diff_2d
 
 
 def _query_posts_from_db(db_path):
@@ -282,18 +328,17 @@ def _query_posts_from_db(db_path):
     Returns a list of sqlite3.Row objects with username, forum,
     content, timestamp, url columns.
     """
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    
-    c.execute("""
-        SELECT username, forum, content, timestamp, url
-        FROM posts
-        WHERE username != 'unknown' AND content IS NOT NULL
-    """)
-    
-    rows = c.fetchall()
-    conn.close()
+    with closing(sqlite3.connect(str(db_path))) as conn:
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+
+        c.execute("""
+            SELECT username, forum, content, timestamp, url
+            FROM posts
+            WHERE username != 'unknown' AND content IS NOT NULL
+        """)
+
+        rows = c.fetchall()
     return rows
 
 
@@ -321,7 +366,7 @@ def load_crawl_data_from_db():
         content = row["content"]
         timestamp = row["timestamp"] or "N/A"
         
-        if len(content.split()) < 5:
+        if not is_substantial_post(content):
             continue
         
         source = row["url"] or "manual"

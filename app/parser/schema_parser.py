@@ -15,7 +15,6 @@ from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 
 
-# Load schemas once at import time
 _SCHEMAS = {}
 _SCHEMA_FILES = [
     os.path.join(os.path.dirname(__file__), "known_schemas.json"),

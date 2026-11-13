@@ -1,33 +1,35 @@
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 import json
 import hashlib
+import logging
 import os
 import re
 import time
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 import litellm
+
+from app.crawler.crawl_utils import is_substantial_post
+from app.diagnostics import log_failure
 
 load_dotenv()
 
 def _extract_json_from_text(text):
     """Robustly extract JSON from LLM output, ignoring conversational wrappers."""
     text = text.strip()
-    # Try to find a JSON block (object or array)
     match = re.search(r'(\{.*?\}|\[.*?\])', text, re.DOTALL)
     if match:
         try:
             return json.loads(match.group(1))
         except json.JSONDecodeError:
             pass
-    # Fallback to direct parse
     try:
         return json.loads(text.replace("```json", "").replace("```", "").strip())
     except json.JSONDecodeError:
         raise ValueError(f"Could not extract valid JSON from LLM response. Snippet: {text[:100]}")
 
-# ── Custom Exceptions ────────────────────────────────────────────
 
 class LLMQuotaExceeded(Exception):
     """Raised when the LLM API returns a quota/rate limit error.
@@ -35,6 +37,11 @@ class LLMQuotaExceeded(Exception):
     This should propagate up to the crawler and STOP the entire crawl,
     not silently continue wasting time on pages that will all fail.
     """
+    pass
+
+
+class LLMOpsecBlocked(Exception):
+    """Raised when an LLM call is blocked by OPSEC rules (e.g. unapproved cloud usage or .onion exfiltration)."""
     pass
 
 
@@ -46,34 +53,67 @@ class JSRenderedPage(Exception):
     pass
 
 
-# ── Configuration & Client ───────────────────────────────────────
-LLM_MODEL = os.getenv("LLM_MODEL", "gemini/gemini-2.5-flash")
+DEFAULT_LLM_MODEL = "ollama/llama3"
+DEFAULT_OLLAMA_API_BASE = "http://localhost:11434"
+
+LLM_MODEL = os.getenv("LLM_MODEL", DEFAULT_LLM_MODEL)
 LLM_API_BASE = os.getenv("LLM_API_BASE", None)
+if not LLM_API_BASE and LLM_MODEL.startswith("ollama/"):
+    LLM_API_BASE = DEFAULT_OLLAMA_API_BASE
 
-# Map GEMINI_API_KEY explicitly if set (LiteLLM uses it for gemini/ models)
-if os.getenv("GEMINI_API_KEY"):
-    os.environ["GEMINI_API_KEY"] = os.getenv("GEMINI_API_KEY")
+ALLOW_CLOUD_LLM = os.getenv("ALLOW_CLOUD_LLM", "false").lower() in ("true", "1", "yes")
+ALLOW_CLOUD_LLM_FOR_ONION = os.getenv("ALLOW_CLOUD_LLM_FOR_ONION", "false").lower() in ("true", "1", "yes")
+HASH_EXTRACTED_USERNAMES = os.getenv("HASH_EXTRACTED_USERNAMES", "false").lower() in ("true", "1", "yes")
 
-# ── File paths (relative to this module, not cwd) ────────────────
+CLOUD_MODEL_PREFIXES = (
+    "gemini/", "google/", "gpt-", "openai/", "claude-", "anthropic/",
+    "mistral/", "azure/", "vertex_ai/", "bedrock/", "groq/", "cohere/"
+)
+
+def is_cloud_model(model_name: str) -> bool:
+    """Check if model routes to an external cloud API provider."""
+    if not model_name:
+        return False
+    m = model_name.lower().strip()
+    if m.startswith(("ollama/", "local/", "vllm/")):
+        return False
+    return any(m.startswith(prefix) for prefix in CLOUD_MODEL_PREFIXES) or ("/" not in m and ("gpt" in m or "claude" in m or "gemini" in m))
+
+def is_onion_url(url: str) -> bool:
+    """Check if a URL targets a .onion hidden service."""
+    if not url:
+        return False
+    try:
+        host = urlparse(url if "://" in url else f"http://{url}").netloc.lower()
+        if ":" in host:
+            host = host.split(":")[0]
+        return host.endswith(".onion")
+    except Exception:
+        return ".onion" in str(url).lower()
+
 _MODULE_DIR = Path(__file__).resolve().parent
 KNOWN_FILE     = _MODULE_DIR / "known_schemas.json"
-CACHE_FILE     = Path("schema_cache.json")       # project root
-HASH_CACHE_FILE = Path("structural_cache.json")  # project root
+CACHE_FILE     = Path("schema_cache.json")
+HASH_CACHE_FILE = Path("structural_cache.json")
 
-# ── Schema cache: remembers each domain's structure ──────────────
 _schema_cache = {}
 _hash_cache   = {}
 
-# Load caches from disk
 for f_path, cache_obj in [(CACHE_FILE, _schema_cache), (HASH_CACHE_FILE, _hash_cache)]:
     if f_path.exists():
-        with open(f_path) as f:
-            cache_obj.update(json.load(f))
+        try:
+            with open(f_path, encoding="utf-8") as f:
+                cache_obj.update(json.load(f))
+        except (json.JSONDecodeError, OSError) as exc:
+            log_failure(f"Failed loading cache file '{f_path}'", exc, level=logging.WARNING)
 
 # Known schemas always override runtime cache
 if KNOWN_FILE.exists():
-    with open(KNOWN_FILE) as f:
-        _schema_cache.update(json.load(f))
+    try:
+        with open(KNOWN_FILE, encoding="utf-8") as f:
+            _schema_cache.update(json.load(f))
+    except (json.JSONDecodeError, OSError) as exc:
+        log_failure(f"Failed loading known schemas '{KNOWN_FILE}'", exc, level=logging.WARNING)
 
 
 def _save_all_caches():
@@ -86,8 +126,6 @@ def _save_all_caches():
 def _get_domain(url):
     return urlparse(url).netloc
 
-
-# ── Shared HTML stripping ────────────────────────────────────────
 
 def _strip_soup_noise(soup, extra_tags=None):
     """Remove script/style/meta noise tags from soup in-place."""
@@ -109,18 +147,26 @@ def get_structural_hash(html):
     return hashlib.sha256(">".join(structure).encode()).hexdigest()
 
 
-def _clean_html_for_llm(html, max_chars=8000):
-    """Strip scripts/styles/noise before sending HTML to the LLM.
+def _redact_text_nodes_for_schema(soup):
+    """Redact actual post and discussion text while preserving tags, classes, and IDs.
     
-    Increased from 6000 to 8000 chars to capture more post containers
-    and give the LLM better context for schema discovery.
+    Eliminates target data leakage while preserving full DOM selector discoverability.
     """
+    for tag in soup.find_all(True):
+        for child in list(tag.children):
+            if isinstance(child, NavigableString) and child.strip():
+                text = child.strip()
+                if len(text) > 25:
+                    child.replace_with(f"[REDACTED_CONTENT_{len(text)}chars]")
+
+
+def _clean_html_for_llm(html, max_chars=8000):
+    """Strip noise and redact discussion text before sending HTML to the LLM for schema discovery."""
     soup = BeautifulSoup(html, "html.parser")
     _strip_soup_noise(soup, extra_tags=["nav", "footer", "header", "svg", "img"])
+    _redact_text_nodes_for_schema(soup)
     return str(soup)[:max_chars]
 
-
-# ── Enhanced text extraction ─────────────────────────────────────
 
 def get_text_from_element(elem):
     text = elem.get_text(strip=True)
@@ -161,7 +207,8 @@ def _safe_get_text(container, selector):
                 text = get_text_from_element(elem)
                 if text is not None:
                     return text
-        except Exception:
+        except Exception as exc:
+            log_failure("Selector lookup failed in _safe_get_text", exc, level=logging.DEBUG, selector=sel)
             continue
     
     return None
@@ -217,7 +264,8 @@ def extract_username_from_patterns(container):
                     username = _extract_username_from_href(elem["href"])
                     if username:
                         return username
-        except Exception:
+        except Exception as exc:
+            log_failure("Username pattern lookup failed", exc, level=logging.DEBUG, pattern=pattern)
             continue
     return None
 
@@ -321,7 +369,6 @@ def _safe_get_timestamp(container, selector):
     return "N/A"
 
 
-# ── Quota/error keywords that should STOP the crawl ─────────────
 _FATAL_ERROR_KEYWORDS = [
     "quota",
     "rate limit",
@@ -351,10 +398,14 @@ def _is_quota_rate_limit(error_msg):
 
 def _execute_llm_call(model, prompt):
     """Issue a single LLM completion call and return the stripped text response."""
+    api_base = LLM_API_BASE
+    if not api_base and model.startswith("ollama/"):
+        api_base = DEFAULT_OLLAMA_API_BASE
+
     response = litellm.completion(
         model=model,
         messages=[{"role": "user", "content": prompt}],
-        api_base=LLM_API_BASE,
+        api_base=api_base,
     )
     return response.choices[0].message.content.strip()
 
@@ -374,34 +425,86 @@ def check_llm_exceptions(e, attempt, max_retries):
         raise LLMQuotaExceeded(f"LLM API fatal error: {error_msg}. Stopping all LLM calls to avoid wasting resources.")
 
 
-def _llm_call_with_retry(prompt, model=None, max_retries=2):
-    """Call LLM via LiteLLM with retry logic. Raises LLMQuotaExceeded on fatal errors."""
-    target_model = os.getenv("LLM_MODEL") or model or "gemini/gemini-2.5-flash"
+def _log_llm_call(model: str, prompt: str, url: str = None, status: str = "INITIATED"):
+    """Log every LLM invocation with timestamp, target model, provider type, and payload size."""
+    timestamp = datetime.now().isoformat()
+    provider_type = "CLOUD" if is_cloud_model(model) else "LOCAL"
+    target = url or "unknown"
+    chars = len(prompt) if prompt else 0
+    log_msg = f"[LLM AUDIT] [{timestamp}] Model: {model} ({provider_type}) | Target: {target} | Payload: {chars} chars | Status: {status}"
+    print(f"  {log_msg}")
     
+    try:
+        log_file = Path("llm_audit.log")
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(log_msg + "\n")
+    except OSError as exc:
+        log_failure("Failed writing llm_audit.log", exc, level=logging.WARNING)
+
+
+def _verify_llm_opsec(target_model: str, url: str = None):
+    """Verify that an LLM call does not violate OPSEC policies."""
+    is_cloud = is_cloud_model(target_model)
+    is_onion = is_onion_url(url) if url else False
+
+    if is_cloud:
+        if not ALLOW_CLOUD_LLM:
+            raise LLMOpsecBlocked(
+                f"[OPSEC ALERT] Cloud LLM call to '{target_model}' blocked. "
+                f"To explicitly permit cloud LLM parsing for OSINT, set ALLOW_CLOUD_LLM=true in .env."
+            )
+        if is_onion and not ALLOW_CLOUD_LLM_FOR_ONION:
+            raise LLMOpsecBlocked(
+                f"[OPSEC ALERT] Cloud LLM call to '{target_model}' for .onion target '{url}' strictly blocked. "
+                f"Exfiltrating dark web target data to commercial cloud is forbidden. "
+                f"Use local Ollama or set ALLOW_CLOUD_LLM_FOR_ONION=true in .env."
+            )
+
+
+def _llm_call_with_retry(prompt, model=None, url=None, max_retries=2):
+    """Call LLM with OPSEC verification, audit logging, and retry logic."""
+    target_model = os.getenv("LLM_MODEL") or model or DEFAULT_LLM_MODEL
+    
+    try:
+        _verify_llm_opsec(target_model, url)
+    except LLMOpsecBlocked as e:
+        print(f"  {e}")
+        _log_llm_call(target_model, prompt, url, status="BLOCKED_BY_OPSEC")
+        return None
+
+    _log_llm_call(target_model, prompt, url, status="SENDING")
+
     for attempt in range(max_retries):
         try:
-            return _execute_llm_call(target_model, prompt)
+            res = _execute_llm_call(target_model, prompt)
+            _log_llm_call(target_model, prompt, url, status="SUCCESS")
+            return res
         except Exception as e:
             print(f"  [-] LLM call attempt {attempt+1} failed: {e}")
+            _log_llm_call(target_model, prompt, url, status=f"FAILED_ATTEMPT_{attempt+1}")
             check_llm_exceptions(e, attempt, max_retries)
             if attempt < max_retries - 1:
                 time.sleep(2 * (attempt + 1))
     
+    log_failure(
+        f"LLM call exhausted {max_retries} attempt(s) without response",
+        level=logging.ERROR,
+        logger_name="llm_parser",
+        model=target_model,
+        url=url or "N/A",
+    )
     return None
-
-
-# ── JS-rendered page detection ───────────────────────────────────
 
 def _has_spa_marker(html_lower):
     """Check if the raw HTML contains a known SPA framework marker string."""
     spa_markers = [
-        'discourse',             # Discourse forum
-        'ember',                 # Ember.js (used by Discourse)
-        '__NEXT_DATA__',         # Next.js
-        'react-root',            # React
-        'ng-app',                # Angular
-        'data-discourse',        # Discourse data attrs
-        'preloaded.currentuser', # Discourse preload
+        'discourse',
+        'ember',
+        '__NEXT_DATA__',
+        'react-root',
+        'ng-app',
+        'data-discourse',
+        'preloaded.currentuser',
     ]
     return any(marker in html_lower for marker in spa_markers)
 
@@ -438,8 +541,6 @@ def _is_js_rendered(html):
     return False
 
 
-# ── Schema validation ────────────────────────────────────────────
-
 def _is_real_value(val):
     """Return True if val is a non-null, non-empty string selector."""
     if val is None:
@@ -467,8 +568,6 @@ def _is_valid_schema(schema):
     
     return has_data
 
-
-# ── Schema Discovery (called ONCE per unknown domain) ────────────
 
 def _parse_schema_json(raw, domain):
     """Parse a raw LLM response string into a schema dict, or return None."""
@@ -521,14 +620,12 @@ If you cannot find a clear selector for a field, use null.
 RAW HTML:
 {html_sample}
 """
-    raw = _llm_call_with_retry(prompt)
+    raw = _llm_call_with_retry(prompt, url=url)
     if not raw:
         return None
     
     return _parse_schema_json(raw, domain)
 
-
-# ── Extraction using discovered schema ───────────────────────────
 
 def _extract_post_from_container(container, username_sel, post_sel, time_sel, url):
     """Extract a single post dict from a container element, or return None."""
@@ -536,7 +633,7 @@ def _extract_post_from_container(container, username_sel, post_sel, time_sel, ur
     post_text = _safe_get_text(container, post_sel) or ""
     timestamp = _safe_get_timestamp(container, time_sel)
 
-    if len(post_text.split()) < 5:
+    if not is_substantial_post(post_text):
         return None
 
     return {
@@ -552,13 +649,29 @@ def _extract_posts_from_containers(containers, schema, url):
     post_sel      = schema.get("post_selector")
     time_sel      = schema.get("timestamp_selector")
     data = []
-    for container in containers:
+    errors = 0
+    for idx, container in enumerate(containers):
         try:
             post = _extract_post_from_container(container, username_sel, post_sel, time_sel, url)
             if post:
                 data.append(post)
-        except Exception:
-            continue
+        except Exception as exc:
+            errors += 1
+            log_failure(
+                "Container extraction failed",
+                exc,
+                level=logging.WARNING,
+                logger_name="llm_parser",
+                url=url,
+                container_index=idx,
+            )
+    if errors > 0:
+        log_failure(
+            f"Schema extraction failed for {errors}/{len(containers)} containers",
+            level=logging.WARNING,
+            logger_name="llm_parser",
+            url=url,
+        )
     return data
 
 
@@ -642,7 +755,8 @@ def _search_element_for_username(element, depth=0):
                 text = found.get_text(strip=True)
                 if text and len(text) < 50 and "\n" not in text:
                     return text
-        except Exception:
+        except Exception as exc:
+            log_failure("Sibling element username lookup failed", exc, level=logging.DEBUG, pattern=pattern)
             continue
     
     for attr in ["data-username", "data-author", "data-user", "data-name"]:
@@ -658,8 +772,6 @@ def _search_element_for_username(element, depth=0):
     
     return None
 
-
-# ── Main entry point ─────────────────────────────────────────────
 
 def _cache_new_schema(domain, schema, html):
     """Store a newly discovered schema in both domain and structural caches."""
@@ -698,7 +810,7 @@ def parse_with_llm(html, url):
             _schema_cache[domain] = schema
     
     if not schema:
-        print(f"[!] New site/template. Calling Gemini for schema discovery...")
+        print(f"[!] New site/template. Requesting schema discovery via {LLM_MODEL}...")
         schema = _discover_schema(html, url)
         
         if schema and _is_valid_schema(schema):
@@ -721,22 +833,32 @@ def clean_soup_for_llm_text_extract(soup):
     for noise in soup(["script", "style", "noscript", "meta", "link", "nav", "footer", "header"]):
         noise.decompose()
 
+def _sanitize_extracted_username(uname: str) -> str:
+    """Clean and optionally pseudonymize extracted usernames."""
+    if not uname or uname.lower() in ("unknown", "n/a", "none"):
+        return "unknown"
+    cleaned = uname.strip()
+    if HASH_EXTRACTED_USERNAMES:
+        return f"anon_{hashlib.sha256(cleaned.encode()).hexdigest()[:10]}"
+    return cleaned
+
+
 def parse_llm_text_extract_response(raw, url):
     try:
         items = _extract_json_from_text(raw)
         return [
-            {"username": i.get("username", "unknown"),
+            {"username": _sanitize_extracted_username(i.get("username", "unknown")),
              "post": i.get("post", "")[:2000],
              "timestamp": i.get("timestamp", "N/A"),
              "source": url}
-            for i in items if i.get("post") and len(i.get("post", "").split()) >= 5
+            for i in items if is_substantial_post(i.get("post"))
         ]
     except (json.JSONDecodeError, ValueError) as e:
         print(f"[-] LLM text extract parse failed: {e}")
         return []
 
 def _llm_text_extract(html, url):
-    """Last resort: ask Gemini to pull structured data from raw text.
+    """Last resort: extract structured data from raw text using local or approved LLM.
     
     Raises LLMQuotaExceeded if API quota is exhausted.
     """
@@ -762,7 +884,7 @@ TEXT:
 {text}
 """
 
-    raw = _llm_call_with_retry(prompt)
+    raw = _llm_call_with_retry(prompt, url=url)
     if not raw:
         return []
 
@@ -778,7 +900,7 @@ def _save_profile_schema(domain, schema):
 
 
 def discover_profile_schema(html, url, target_username):
-    """Ask Gemini to find CSS selectors for posts on a profile page.
+    """Find CSS selectors for posts on a profile page.
     
     Caches the result in schema_cache.json under "profile_schema" so it
     only runs once per domain.
@@ -815,7 +937,7 @@ RAW HTML:
 {html_sample}
 """
 
-    raw = _llm_call_with_retry(prompt)
+    raw = _llm_call_with_retry(prompt, url=url)
     if not raw:
         return None
         

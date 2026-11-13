@@ -15,15 +15,24 @@ comparison (Model.model.AuthorSimilarityModel.predict_similarity)
 still works exactly as before — it doesn't depend on this module.
 """
 
+from contextlib import closing
+import json
+import logging
 import os
 import sqlite3
-import json
-import numpy as np
-from datetime import datetime
 from collections import defaultdict
+from datetime import datetime
 from urllib.parse import urlparse
 
-from .features import extract_user_features, get_feature_count
+import numpy as np
+
+from app.crawler.crawl_utils import is_substantial_post
+from app.diagnostics import log_failure, sanitize_finite_array
+from .features import extract_user_features, CANONICAL_FEATURE_DIM
+from .thresholds import (
+    MATCH_THRESHOLD, MISMATCH_THRESHOLD, DEFAULT_CANDIDATE_THRESHOLD,
+    VERDICT_MATCH, VERDICT_MISMATCH, VERDICT_UNCERTAIN
+)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(BASE_DIR, "Forum_profiles.db")
@@ -40,55 +49,52 @@ def init_fingerprint_tables():
     
     Adds to the existing database without modifying existing tables.
     """
-    conn = _get_conn()
-    c = conn.cursor()
-    
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS fingerprints (
-        id              INTEGER PRIMARY KEY AUTOINCREMENT,
-        username        TEXT NOT NULL,
-        forum           TEXT NOT NULL,
-        fingerprint     TEXT NOT NULL,
-        post_count      INTEGER DEFAULT 0,
-        total_words     INTEGER DEFAULT 0,
-        first_seen      TEXT DEFAULT CURRENT_TIMESTAMP,
-        last_updated    TEXT DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(username, forum)
-    )""")
-    
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS training_log (
-        id              INTEGER PRIMARY KEY AUTOINCREMENT,
-        trained_at      TEXT DEFAULT CURRENT_TIMESTAMP,
-        n_users         INTEGER,
-        n_posts_total   INTEGER,
-        n_pairs         INTEGER,
-        n_positive      INTEGER,
-        n_negative      INTEGER,
-        cv_roc_auc      REAL,
-        cv_accuracy     REAL,
-        train_roc_auc   REAL,
-        model_version   TEXT
-    )""")
-    
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS similarity_results (
-        id              INTEGER PRIMARY KEY AUTOINCREMENT,
-        username_a      TEXT NOT NULL,
-        forum_a         TEXT NOT NULL,
-        username_b      TEXT NOT NULL,
-        forum_b         TEXT NOT NULL,
-        score           REAL NOT NULL,
-        computed_at     TEXT DEFAULT CURRENT_TIMESTAMP,
-        model_version   TEXT,
-        UNIQUE(username_a, forum_a, username_b, forum_b)
-    )""")
-    
-    conn.commit()
-    conn.close()
+    with closing(_get_conn()) as conn:
+        c = conn.cursor()
 
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS fingerprints (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            username        TEXT NOT NULL,
+            forum           TEXT NOT NULL,
+            fingerprint     TEXT NOT NULL,
+            post_count      INTEGER DEFAULT 0,
+            total_words     INTEGER DEFAULT 0,
+            first_seen      TEXT DEFAULT CURRENT_TIMESTAMP,
+            last_updated    TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(username, forum)
+        )""")
 
-# ── DB read queries ──────────────────────────────────────────────
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS training_log (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            trained_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            n_users         INTEGER,
+            n_posts_total   INTEGER,
+            n_pairs         INTEGER,
+            n_positive      INTEGER,
+            n_negative      INTEGER,
+            cv_roc_auc      REAL,
+            cv_accuracy     REAL,
+            train_roc_auc   REAL,
+            model_version   TEXT
+        )""")
+
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS similarity_results (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            username_a      TEXT NOT NULL,
+            forum_a         TEXT NOT NULL,
+            username_b      TEXT NOT NULL,
+            forum_b         TEXT NOT NULL,
+            score           REAL NOT NULL,
+            computed_at     TEXT DEFAULT CURRENT_TIMESTAMP,
+            model_version   TEXT,
+            UNIQUE(username_a, forum_a, username_b, forum_b)
+        )""")
+
+        conn.commit()
+
 
 def _query_fingerprint(username, forum):
     """Read one fingerprint row from the database.
@@ -96,15 +102,13 @@ def _query_fingerprint(username, forum):
     Returns the raw row tuple (fingerprint_json, post_count, total_words, last_updated),
     or None if not found.
     """
-    conn = _get_conn()
-    c = conn.cursor()
-    c.execute("""
-        SELECT fingerprint, post_count, total_words, last_updated
-        FROM fingerprints WHERE username = ? AND forum = ?
-    """, (username, forum))
-    row = c.fetchone()
-    conn.close()
-    return row
+    with closing(_get_conn()) as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT fingerprint, post_count, total_words, last_updated
+            FROM fingerprints WHERE username = ? AND forum = ?
+        """, (username, forum))
+        return c.fetchone()
 
 
 def _query_all_fingerprints():
@@ -113,28 +117,24 @@ def _query_all_fingerprints():
     Returns a list of raw row tuples
     (username, forum, fingerprint_json, post_count, total_words, last_updated).
     """
-    conn = _get_conn()
-    c = conn.cursor()
-    c.execute("""
-        SELECT username, forum, fingerprint, post_count, total_words, last_updated
-        FROM fingerprints ORDER BY last_updated DESC
-    """)
-    rows = c.fetchall()
-    conn.close()
-    return rows
+    with closing(_get_conn()) as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT username, forum, fingerprint, post_count, total_words, last_updated
+            FROM fingerprints ORDER BY last_updated DESC
+        """)
+        return c.fetchall()
 
 
 def _query_distinct_users():
     """Read all distinct (username, forum) pairs from the posts table."""
-    conn = _get_conn()
-    c = conn.cursor()
-    c.execute("""
-        SELECT DISTINCT username, forum FROM posts
-        WHERE username != 'unknown' AND content IS NOT NULL
-    """)
-    users = c.fetchall()
-    conn.close()
-    return users
+    with closing(_get_conn()) as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT DISTINCT username, forum FROM posts
+            WHERE username != 'unknown' AND content IS NOT NULL
+        """)
+        return c.fetchall()
 
 
 def _query_posts_for_user(username, forum):
@@ -142,96 +142,86 @@ def _query_posts_for_user(username, forum):
     
     Returns a list of (content, timestamp, url) tuples.
     """
-    conn = _get_conn()
-    c = conn.cursor()
-    c.execute("""
-        SELECT content, timestamp, url FROM posts
-        WHERE username = ? AND forum = ? AND content IS NOT NULL
-    """, (username, forum))
-    rows = c.fetchall()
-    conn.close()
-    return rows
+    with closing(_get_conn()) as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT content, timestamp, url FROM posts
+            WHERE username = ? AND forum = ? AND content IS NOT NULL
+        """, (username, forum))
+        return c.fetchall()
 
-
-# ── DB write commands ────────────────────────────────────────────
 
 def _upsert_fingerprint(username, forum, fp_json, post_count, total_words):
     """Write or update a fingerprint row in the database."""
-    conn = _get_conn()
-    c = conn.cursor()
-    
-    c.execute("""
-        INSERT INTO fingerprints (username, forum, fingerprint, post_count, total_words, last_updated)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(username, forum) DO UPDATE SET
-            fingerprint = excluded.fingerprint,
-            post_count = excluded.post_count,
-            total_words = excluded.total_words,
-            last_updated = excluded.last_updated
-    """, (username, forum, fp_json, post_count, total_words, datetime.now().isoformat()))
-    
-    conn.commit()
-    conn.close()
+    with closing(_get_conn()) as conn:
+        c = conn.cursor()
+
+        c.execute("""
+            INSERT INTO fingerprints (username, forum, fingerprint, post_count, total_words, last_updated)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(username, forum) DO UPDATE SET
+                fingerprint = excluded.fingerprint,
+                post_count = excluded.post_count,
+                total_words = excluded.total_words,
+                last_updated = excluded.last_updated
+        """, (username, forum, fp_json, post_count, total_words, datetime.now().isoformat()))
+
+        conn.commit()
 
 
 def _delete_fingerprint_row(username, forum):
     """Delete one fingerprint row. Returns True if a row was deleted."""
-    conn = _get_conn()
-    c = conn.cursor()
-    c.execute("DELETE FROM fingerprints WHERE username = ? AND forum = ?", (username, forum))
-    deleted = c.rowcount
-    conn.commit()
-    conn.close()
+    with closing(_get_conn()) as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM fingerprints WHERE username = ? AND forum = ?", (username, forum))
+        deleted = c.rowcount
+        conn.commit()
     return deleted > 0
 
 
 def _insert_similarity_results(results, model_version):
     """Bulk-insert similarity result rows into the database."""
-    conn = _get_conn()
-    c = conn.cursor()
-    
-    for r in results:
-        user_a, forum_a = r["user_a"].rsplit("@", 1)
-        user_b, forum_b = r["user_b"].rsplit("@", 1)
-        
-        c.execute("""
-            INSERT OR REPLACE INTO similarity_results
-            (username_a, forum_a, username_b, forum_b, score, computed_at, model_version)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (user_a, forum_a, user_b, forum_b, r["score"],
-              datetime.now().isoformat(), model_version))
-    
-    conn.commit()
-    conn.close()
+    with closing(_get_conn()) as conn:
+        c = conn.cursor()
+
+        for r in results:
+            user_a, forum_a = r["user_a"].rsplit("@", 1)
+            user_b, forum_b = r["user_b"].rsplit("@", 1)
+
+            c.execute("""
+                INSERT OR REPLACE INTO similarity_results
+                (username_a, forum_a, username_b, forum_b, score, computed_at, model_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (user_a, forum_a, user_b, forum_b, r["score"],
+                  datetime.now().isoformat(), model_version))
+
+        conn.commit()
 
 
 def _insert_training_log_row(n_users, n_posts_total, metrics, model_version):
     """Write one training log row to the database."""
-    conn = _get_conn()
-    c = conn.cursor()
-    
-    c.execute("""
-        INSERT INTO training_log
-        (n_users, n_posts_total, n_pairs, n_positive, n_negative,
-         cv_roc_auc, cv_accuracy, train_roc_auc, model_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        n_users,
-        n_posts_total,
-        metrics.get("n_pairs", 0),
-        metrics.get("n_positive", 0),
-        metrics.get("n_negative", 0),
-        metrics.get("cv_roc_auc_mean", 0),
-        metrics.get("cv_accuracy_mean", 0),
-        metrics.get("train_roc_auc", 0),
-        model_version,
-    ))
-    
-    conn.commit()
-    conn.close()
+    with closing(_get_conn()) as conn:
+        c = conn.cursor()
 
+        c.execute("""
+            INSERT INTO training_log
+            (n_users, n_posts_total, n_pairs, n_positive, n_negative,
+             cv_roc_auc, cv_accuracy, train_roc_auc, model_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            n_users,
+            n_posts_total,
+            metrics.get("n_pairs", 0),
+            metrics.get("n_positive", 0),
+            metrics.get("n_negative", 0),
+            metrics.get("cv_roc_auc_mean", 0),
+            metrics.get("cv_accuracy_mean", 0),
+            metrics.get("train_roc_auc", 0),
+            model_version,
+        ))
 
-# ── Fingerprint CRUD ─────────────────────────────────────────────
+        conn.commit()
+
 
 def _load_lda_components_from_model():
     """Load LDA model, vectorizer, and board_vocab from the saved AuthorSimilarityModel.
@@ -242,7 +232,11 @@ def _load_lda_components_from_model():
         from .model import AuthorSimilarityModel
         model = AuthorSimilarityModel.load()
         return model.lda_model, model.lda_vectorizer, model.board_vocab
-    except Exception:
+    except FileNotFoundError as exc:
+        log_failure("Saved model not found when loading LDA components", exc, level=logging.DEBUG, logger_name="fingerprint_store")
+        return None, None, None
+    except Exception as exc:
+        log_failure("Failed loading LDA components from saved model", exc, level=logging.WARNING, logger_name="fingerprint_store")
         return None, None, None
 
 
@@ -274,7 +268,7 @@ def store_fingerprint(username, forum, posts, timestamps=None, sources=None, lda
         lda_model, lda_vectorizer, board_vocab = _load_lda_components_from_model()
     
     fingerprint = extract_user_features(posts, timestamps, sources, lda_model, lda_vectorizer, board_vocab)
-    fingerprint = np.nan_to_num(fingerprint, nan=0.0, posinf=0.0, neginf=0.0)
+    fingerprint = sanitize_finite_array(fingerprint, context=f"store_fingerprint({username}@{forum})")
     
     fp_json = json.dumps(fingerprint.tolist())
     total_words = sum(len(p.split()) for p in posts)
@@ -312,15 +306,27 @@ def update_fingerprint(username, forum, lda_model=None, lda_vectorizer=None, boa
     return store_fingerprint(username, forum, posts, timestamps, sources, lda_model, lda_vectorizer, board_vocab)
 
 
+def _normalize_fingerprint_vector(raw_list_or_arr):
+    """Ensure a loaded fingerprint is a 1D float array of exactly CANONICAL_FEATURE_DIM."""
+    arr = np.array(raw_list_or_arr, dtype=np.float64)
+    if arr.ndim != 1:
+        arr = arr.flatten()
+    if arr.shape[0] < CANONICAL_FEATURE_DIM:
+        arr = np.pad(arr, (0, CANONICAL_FEATURE_DIM - arr.shape[0]), mode='constant')
+    elif arr.shape[0] > CANONICAL_FEATURE_DIM:
+        arr = arr[:CANONICAL_FEATURE_DIM]
+    return arr
+
+
 def get_fingerprint(username, forum):
-    """Retrieve a stored fingerprint as a numpy array."""
+    """Retrieve a stored fingerprint as a numpy array with canonical dimensions."""
     row = _query_fingerprint(username, forum)
     
     if not row:
         return None
     
     return {
-        "fingerprint": np.array(json.loads(row[0])),
+        "fingerprint": _normalize_fingerprint_vector(json.loads(row[0])),
         "post_count": row[1],
         "total_words": row[2],
         "last_updated": row[3],
@@ -328,7 +334,7 @@ def get_fingerprint(username, forum):
 
 
 def get_all_fingerprints():
-    """Retrieve all stored fingerprints.
+    """Retrieve all stored fingerprints with canonical dimensions.
     
     Returns:
         list of dicts with username, forum, fingerprint (numpy), post_count
@@ -337,7 +343,7 @@ def get_all_fingerprints():
         {
             "username": row[0],
             "forum": row[1],
-            "fingerprint": np.array(json.loads(row[2])),
+            "fingerprint": _normalize_fingerprint_vector(json.loads(row[2])),
             "post_count": row[3],
             "total_words": row[4],
             "last_updated": row[5],
@@ -350,8 +356,6 @@ def delete_fingerprint(username, forum):
     """Remove a fingerprint from the store."""
     return _delete_fingerprint_row(username, forum)
 
-
-# ── Bulk operations ──────────────────────────────────────────────
 
 def rebuild_all_fingerprints():
     """Recompute ALL fingerprints from the posts table.
@@ -393,7 +397,7 @@ def ingest_crawl_data(filepath="crawl_data.json"):
             continue
         
         post = entry.get("post", "")
-        if len(post.split()) < 5:
+        if not is_substantial_post(post):
             continue
         
         source = entry.get("source", "manual")
@@ -417,15 +421,29 @@ def ingest_crawl_data(filepath="crawl_data.json"):
     return stored
 
 
-# ── Similarity comparison ────────────────────────────────────────
+def _validate_fingerprint_shapes(fp_a, fp_b, model=None):
+    """Ensure fingerprints are 1D arrays with matching canonical dimensions."""
+    if not isinstance(fp_a, np.ndarray) or not isinstance(fp_b, np.ndarray):
+        raise TypeError("Fingerprints must be numpy arrays")
+    if fp_a.ndim != 1 or fp_b.ndim != 1:
+        raise ValueError(f"Fingerprints must be 1D vectors, got fp_a={fp_a.ndim}D, fp_b={fp_b.ndim}D")
+    if fp_a.shape != fp_b.shape:
+        raise ValueError(f"Fingerprint shape mismatch: fp_a is {fp_a.shape}, fp_b is {fp_b.shape}")
+    
+    expected = getattr(getattr(model, 'classifier', None), 'n_features_in_', 
+                       getattr(getattr(model, 'scaler', None), 'n_features_in_', CANONICAL_FEATURE_DIM))
+    if fp_a.shape[0] != expected:
+        raise ValueError(f"Fingerprint dimension mismatch: expected {expected}, got {fp_a.shape[0]}")
+
 
 def _score_with_model(fp_a, fp_b, model):
     """Compute similarity score using the trained ML model.
     
     Returns (score, verdict).
     """
+    _validate_fingerprint_shapes(fp_a, fp_b, model=model)
     diff = np.abs(fp_a - fp_b).reshape(1, -1)
-    diff = np.nan_to_num(diff, nan=0.0, posinf=0.0, neginf=0.0)
+    diff = sanitize_finite_array(diff, context="fingerprint_store._score_with_model")
     score, verdict, _ = model.predict_pair_twd(diff)
     return score, verdict
 
@@ -435,14 +453,15 @@ def _score_with_cosine(fp_a, fp_b):
     
     Returns (score, verdict).
     """
+    _validate_fingerprint_shapes(fp_a, fp_b, model=None)
     from sklearn.metrics.pairwise import cosine_similarity
     score = float(cosine_similarity(fp_a.reshape(1, -1), fp_b.reshape(1, -1))[0][0])
-    if score > 0.8:
-        verdict = "MATCH"
-    elif score < 0.3:
-        verdict = "MISMATCH"
+    if score >= MATCH_THRESHOLD:
+        verdict = VERDICT_MATCH
+    elif score <= MISMATCH_THRESHOLD:
+        verdict = VERDICT_MISMATCH
     else:
-        verdict = "UNCERTAIN"
+        verdict = VERDICT_UNCERTAIN
     return score, verdict
 
 
@@ -454,7 +473,8 @@ def _compute_similarity_score(fp_a, fp_b, model=None):
     Returns:
         tuple: (score, verdict)
     """
-    if model and model.is_trained:
+    _validate_fingerprint_shapes(fp_a, fp_b, model=model)
+    if model and getattr(model, "is_trained", False):
         return _score_with_model(fp_a, fp_b, model)
     return _score_with_cosine(fp_a, fp_b)
 
@@ -516,7 +536,7 @@ def _identify_matches_above_threshold(all_fps, threshold, model):
     return results
 
 
-def compare_all_users(model=None, threshold=0.5):
+def compare_all_users(model=None, threshold=DEFAULT_CANDIDATE_THRESHOLD):
     """Compare ALL user pairs and return matches above threshold.
     
     Args:
@@ -538,8 +558,6 @@ def compare_all_users(model=None, threshold=0.5):
     return results
 
 
-# ── Training log ─────────────────────────────────────────────────
-
 def log_training(metrics, n_users=0, n_posts_total=0, model_version="v1"):
     """Log a training run to the database.
     
@@ -550,18 +568,17 @@ def log_training(metrics, n_users=0, n_posts_total=0, model_version="v1"):
 
 def get_training_history():
     """Get all training runs."""
-    conn = _get_conn()
-    c = conn.cursor()
-    
-    c.execute("""
-        SELECT trained_at, n_users, n_posts_total, n_pairs,
-               cv_roc_auc, cv_accuracy, train_roc_auc, model_version
-        FROM training_log ORDER BY trained_at DESC
-    """)
-    
-    rows = c.fetchall()
-    conn.close()
-    
+    with closing(_get_conn()) as conn:
+        c = conn.cursor()
+
+        c.execute("""
+            SELECT trained_at, n_users, n_posts_total, n_pairs,
+                   cv_roc_auc, cv_accuracy, train_roc_auc, model_version
+            FROM training_log ORDER BY trained_at DESC
+        """)
+
+        rows = c.fetchall()
+
     return [{
         "trained_at": r[0],
         "n_users": r[1],
@@ -574,32 +591,28 @@ def get_training_history():
     } for r in rows]
 
 
-# ── Stats ────────────────────────────────────────────────────────
-
 def get_store_stats():
     """Get summary stats about the fingerprint store."""
-    conn = _get_conn()
-    c = conn.cursor()
-    
-    c.execute("SELECT COUNT(*) FROM fingerprints")
-    n_fingerprints = c.fetchone()[0]
-    
-    c.execute("SELECT SUM(post_count), SUM(total_words) FROM fingerprints")
-    row = c.fetchone()
-    total_posts = row[0] or 0
-    total_words = row[1] or 0
-    
-    c.execute("SELECT COUNT(DISTINCT forum) FROM fingerprints")
-    n_forums = c.fetchone()[0]
-    
-    c.execute("SELECT COUNT(*) FROM training_log")
-    n_trainings = c.fetchone()[0]
-    
-    c.execute("SELECT COUNT(*) FROM similarity_results")
-    n_cached_results = c.fetchone()[0]
-    
-    conn.close()
-    
+    with closing(_get_conn()) as conn:
+        c = conn.cursor()
+
+        c.execute("SELECT COUNT(*) FROM fingerprints")
+        n_fingerprints = c.fetchone()[0]
+
+        c.execute("SELECT SUM(post_count), SUM(total_words) FROM fingerprints")
+        row = c.fetchone()
+        total_posts = row[0] or 0
+        total_words = row[1] or 0
+
+        c.execute("SELECT COUNT(DISTINCT forum) FROM fingerprints")
+        n_forums = c.fetchone()[0]
+
+        c.execute("SELECT COUNT(*) FROM training_log")
+        n_trainings = c.fetchone()[0]
+
+        c.execute("SELECT COUNT(*) FROM similarity_results")
+        n_cached_results = c.fetchone()[0]
+
     return {
         "fingerprints": n_fingerprints,
         "total_posts": total_posts,

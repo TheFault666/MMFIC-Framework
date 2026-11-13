@@ -15,7 +15,8 @@ element, or a table cell next to the content cell.
 from bs4 import BeautifulSoup, Tag
 import re
 
-# ── Noise patterns to exclude ────────────────────────────────────
+from app.crawler.crawl_utils import MIN_POST_WORDS
+
 _NOISE_RE = re.compile(
     r"(cookie|privacy|terms of service|copyright|all rights reserved|"
     r"powered by|admin@|sign up|sign in|log in|register|"
@@ -27,27 +28,23 @@ _NOISE_RE = re.compile(
 
 _NAV_TAGS = {"nav", "header", "footer", "aside", "noscript", "script", "style"}
 
-# Patterns that indicate a username element
 _USERNAME_CLASS_RE = re.compile(
     r"user|author|poster|member|nick|handle|name|identity|profile|"
     r"hover-card|display.?name|byline",
     re.I
 )
 
-# Patterns that indicate a post content element
 _CONTENT_CLASS_RE = re.compile(
     r"post|message|content|body|text|comment|reply|entry|article|"
     r"bbcode|description",
     re.I
 )
 
-# Patterns that indicate a timestamp element
 _TIME_CLASS_RE = re.compile(
     r"time|date|timestamp|posted|when|ago|created|published",
     re.I
 )
 
-# URL patterns that contain usernames
 _PROFILE_HREF_RE = re.compile(
     r"/(?:u|user|profile|members?|author|people)/"
     r"([^/?#&]+)",
@@ -110,7 +107,7 @@ def score_child_group(children):
     sample = children[0]
     sample_text = sample.get_text(strip=True)
     
-    if len(sample_text.split()) < 5:
+    if len(sample_text.split()) < MIN_POST_WORDS:
         return 0
     
     if sample.find(True, class_=_USERNAME_CLASS_RE):
@@ -370,8 +367,6 @@ def _extract_from_tables(soup, url):
                 
     return data
 
-
-# ── Helper functions ─────────────────────────────────────────────
 
 def _try_deep_username_links(container):
     for a in container.find_all("a", href=True):
