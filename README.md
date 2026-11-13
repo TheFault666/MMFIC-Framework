@@ -5,7 +5,6 @@
 
 # MMFIC: Multi-Modal Forum Identity Correlation Framework 
 
-<<<<<<< HEAD
 *Currently in Public Beta. See the [**Wiki**](https://github.com/TheFault666/MMFIC-Framework/wiki) for known issues and contribution guidelines.*
 
 **MMFIC** (Multi-Modal Forum Identity Correlation) is a Open Source Intelligence (OSINT) framework designed to track, correlate, and unmask anonymous threat actors across heavily fortified Darkweb forums (.onion) and Clearnet platforms (like X/Twitter). 
@@ -14,26 +13,7 @@ The framework is divided into two primary subsystems:
 1. **Trowler (Data Acquisition Engine):** A LLM-powered headless crawler built to bypass EndGame, DDoS-Guard, and strict login walls.
 2. **The Similarity Engine:** A Machine Learning pipeline that extracts stylistic, linguistic, and behavioral metadata from crawled posts to correlate user pseudonyms across different platforms.
 
-## Key Features
-=======
-<p align="center">
-  <img src="assets/mmfic_logo.jpg" alt="MMFIC Logo" width="300"/>
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="assets/trowler_logo.jpg" alt="Trowler Logo" width="300"/>
-</p>
-
-*Currently in Public Beta. See [WIKI.md](WIKI.md) for full architecture and REST API documentation, and [ROADMAP.md](ROADMAP.md) for development milestones.*
-
-**MMFIC** (Multi-Modal Forum Identity Correlation) is an Open Source Intelligence (OSINT) framework designed to track, correlate, and attribute anonymous threat actors across fortified Darkweb forums (`.onion`) and Clearnet platforms (like X/Twitter). 
-
-The framework is divided into two primary subsystems:
-1. **Trowler (Data Acquisition Engine):** A Playwright-based Stealth browser crawler routed over Tor SOCKS5 (`socks5h` DNS isolation) with Human-in-the-Loop (HITL) CAPTCHA handling, multi-tier DOM extraction, and OPSEC-gated LLM schema discovery.
-2. **MMFIC Similarity Engine (Attribution & Correlation):** A Machine Learning pipeline that builds 292-dimensional linguistic, behavioral, temporal, and topical author fingerprints stored in SQLite (`Forum_profiles.db`) and scores cross-forum identity pairs using LightGBM with a Three-Way Decision tie-breaker.
-
----
-
 ## 🚀 Key Features
->>>>>>> b27db2c (Refractor: updated documentation and harden security)
 
 ### Trowler (Crawling Subsystem)
 * **Anti-Bot Circumvention:** Utilizes Playwright Chromium with Stealth plugins and a custom Human-In-The-Loop (HITL) fallback to bypass CAPTCHAs, wait queues, and login walls.
@@ -132,18 +112,18 @@ python -m Model.train --data crawl_data.json --neg 3 --seed 42 --lda-topics 20
 ## 📖 Detailed Documentation
 
 Comprehensive architecture diagrams, REST API specs, and technical references are maintained in the repository and Git Wiki:
-* [WIKI.md](WIKI.md) — Complete architecture, crawler waterfall, feature dimensions, SQLite schema, and API reference.
-* [_Sidebar.md](_Sidebar.md) — Custom Git Wiki sidebar navigation file.
-* [ROADMAP.md](ROADMAP.md) — Architectural limitations and future development roadmap.
+* [WIKI](https://github.com/TheFault666/MMFIC-Framework/wiki) — Complete architecture, crawler waterfall, feature dimensions, SQLite schema, and API reference.
 
 ---
 
-<<<<<<< HEAD
 ## License
+
 This project is licensed under the **GNU Affero General Public License v3.0 (AGPLv3)**. 
 Permissions of this strong copyleft license are conditioned on making available complete source code of licensed works and modifications, which include larger works using a licensed work, under the same license. Copyright and license notices must be preserved. Contributors provide an express grant of patent rights.
-=======
+
+
 ## 📚 Academic Citation
+
 If you utilize this framework in your research, please cite our paper:
 ```bibtex
 @article{MMFIC2026,
@@ -153,9 +133,7 @@ If you utilize this framework in your research, please cite our paper:
   journal={Pending Publication}
 }
 ```
-
 ---
 
 ## ⚖️ License
 This project is licensed under the **GNU Affero General Public License v3.0 (AGPLv3)**. Permissions of this strong copyleft license are conditioned on making available complete source code of licensed works and modifications, which include larger works using a licensed work, under the same license. Copyright and license notices must be preserved.
->>>>>>> b27db2c (Refractor: updated documentation and harden security)
