@@ -5,7 +5,7 @@
 
 # MMFIC: Multi-Modal Forum Identity Correlation Framework 
 
-*Currently in Public Beta. See the Wiki for known issues and contribution guidelines.*
+*Currently in Public Beta. See the [**Wiki**](https://github.com/TheFault666/MMFIC-Framework/wiki) for known issues and contribution guidelines.*
 
 **MMFIC** (Multi-Modal Forum Identity Correlation) is a Open Source Intelligence (OSINT) framework designed to track, correlate, and unmask anonymous threat actors across heavily fortified Darkweb forums (.onion) and Clearnet platforms (like X/Twitter). 
 
